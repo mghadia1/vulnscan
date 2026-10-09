@@ -15,7 +15,7 @@ It deliberately does not use pip-audit, safety, osv-scanner, npm audit,
 govulncheck, Trivy, Grype, Snyk, gitleaks, trufflehog, detect-secrets,
 hadolint or Checkov underneath: the point is to build what they do.
 
-> **Status:** Milestones 0-5 of 7. `vulnscan scan` finds a repository's
+> **Status:** Milestones 0-6 of 7. `vulnscan scan` finds a repository's
 > Python, npm and Go dependencies (installed, locked, pinned or declared)
 > and checks them against a local index of OSV's advisories, with version
 > ordering and CVSS scoring written by hand: findings with severity and the
@@ -39,7 +39,7 @@ hadolint or Checkov underneath: the point is to build what they do.
 | 3 | Findings: packages matched to advisories, the fixing version, CVSS 3.1 scores; text, JSON and SARIF; `--fail-on`; a baseline file | Built |
 | 4 | Secrets in files and git history, never shown in a finding | Built |
 | 5 | Dockerfile and Compose rules | Built |
-| 6 | Evaluation on my own repositories: every finding labelled by hand; dependency findings cross-checked against osv-scanner | Not started |
+| 6 | Evaluation on my own repositories: every finding labelled by hand; dependency findings cross-checked against osv-scanner | Built ([docs/evaluation.md](docs/evaluation.md)) |
 | 7 | README: diagram, decisions, failures, results; explain-it-yourself prompts | Not started |
 
 "Built" means built and tested on my machine; there is no GitHub repository
@@ -157,6 +157,17 @@ it was found at, and **how sure** the version is:
   lists modules needed only to check other go.mod files. `replace` is
   applied. The standard library is a dependency too ("stdlib"): pinned by a
   `toolchain` line, otherwise a range from the `go` line.
+- **Bundled packages** (since Milestone 6, after the cross-check with
+  osv-scanner showed the gap): what a distribution carries inside itself,
+  from the metadata under `<package>/_vendor` (setuptools keeps
+  `.dist-info` folders there), the CycloneDX SBOM there (pip's
+  `bom.cdx.json`), and SBOMs in `.dist-info/sboms` (PEP 770), by package
+  URL (`pkg:pypi/urllib3@2.7.0`). Each is marked "bundled in <package>",
+  and its fix names the package to upgrade. A component that is part of
+  the distribution itself is not another package; one of another kind (a C
+  library) is counted as not checkable. Placeholder metadata (iCloud) is
+  named, not read. Checked against pip's own `_vendor/vendor.txt`: the
+  SBOM gives exactly its pins.
 - **Not read, and said so:** yarn and pnpm lockfiles, Pipfile.lock,
   Java (Maven, Gradle), R (renv), Rust. (Dockerfiles and Compose files are
   not dependency files: the container checks read them.) Anything a reader cannot make sense of is a problem
@@ -584,8 +595,9 @@ test guesses against it at billions per second.
 
 The whole `projects` folder: 31 git repositories, 298 commits, 2,351
 distinct file versions and 2,836 working-tree files read. A scan took 12
-to 50 s across four timed runs on one 8 GB M2 laptop; the spread is not
-explained, and scan time is measured properly in Milestone 6.
+to 50 s across four timed runs on one 8 GB M2 laptop. Milestone 6 measured
+it properly: the spread was cold reads of an iCloud folder, and a warm scan
+is CPU-bound (see "Evaluation on my repositories").
 
 - **The first run found 4.** Three were a SHA-256 hash named
   `token_lengths_sha256` (in two versions of a loraforge-llm evidence
@@ -750,6 +762,29 @@ Milestone 6 decides fixes with me. A first test with these files ran into
 a placeholder Dockerfile, and that led to a bug in Milestone 4's secret
 scan (failure 14).
 
+## Evaluation on my repositories
+
+The whole record is in [docs/evaluation.md](docs/evaluation.md) (Milestone 6,
+2026-10-09). In short:
+
+- **Against osv-scanner** (2.6.0, same tree, same day's OSV data): on every
+  package both tools read, the same 151 advisory groups, none that only
+  osv-scanner reports, and the same severity score in 64 of 65. That
+  agreement came after a fix: the first comparison showed VulnScan missing
+  code bundled inside other packages (78 advisory groups in pip's bundled
+  urllib3, msgpack and setuptools), so bundled packages are now read.
+  osv-scanner covers R and Java; VulnScan does not (nothing there today).
+- **Every finding labelled by hand:** of 151 decided dependency findings,
+  125 are vulnerable code that is there, 26 match by version only (pip
+  bundles only `pkg_resources` of setuptools); the 73 undecided are all
+  not affected on inspection. Secrets: 1, true, not committed. Containers:
+  49, 48 true.
+- **Scan time:** the whole portfolio in 7.4 s (median of five warm runs, one
+  8 GB M2 laptop), 2.1 s of it dependencies and 5.8 s secrets with all
+  history; it was 14.0 s until a profile showed the token-format patterns
+  taking 57% of the secret scan, and a format whose fixed literal is not in
+  a file is no longer searched for (the same findings, byte for byte).
+
 ## Development
 
 ```bash
@@ -787,6 +822,10 @@ install does not work outside pytest.
 | `src/vulnscan/secrets/rules.py` | What a secret looks like: formats, private keys, JWTs, high-entropy assignments; redaction; the fingerprint |
 | `src/vulnscan/secrets/__init__.py` | The secret scan: history and working tree, states, pushed, acceptances |
 | `scripts/show_context.py` | The lines around each secret finding, with values masked, for labelling by hand |
+| `src/vulnscan/inventory/sbom.py` | Package URLs and CycloneDX SBOMs: packages bundled inside others |
+| `docs/evaluation.md` | Milestone 6: every finding on my portfolio, labelled; the osv-scanner cross-check; scan time |
+| `scripts/compare_osv_scanner.py` | VulnScan's findings against osv-scanner's, on the same tree and data |
+| `bench/scan_time.py`, `bench/results/` | Scan time by part, with a swap check per run |
 | `src/vulnscan/containers/__init__.py` | The Dockerfile and Compose rules; reading a file, or its committed copy; acceptances by rule |
 | `src/vulnscan/containers/dockerfile.py` | Dockerfiles, read as BuildKit reads them; words and ENV/ARG pairs |
 | `src/vulnscan/containers/yamlsub.py` | The part of YAML Compose files use |
@@ -904,3 +943,21 @@ install does not work outside pytest.
 19. **Two planted bugs passed at first** (see "How it is tested" under
     Dockerfiles and Compose files): a weak test, strengthened, and code
     that a later fix had made redundant, removed.
+20. **VulnScan did not see code bundled inside other packages.** The
+    osv-scanner cross-check found 78 advisory groups VulnScan missed, all
+    in pip's copies of urllib3, msgpack and setuptools (pip lists them in
+    an SBOM). Bundled packages are read now, and the comparison was run
+    again: 0 missed. Found by the evaluation, so disclosed as such.
+21. **The scan-time script first recorded CPU time as 0**: `/usr/bin/time
+    -l` prints user and system time on one line, and the script read one
+    value per line. Fixed; the run was repeated, but its results file was
+    deleted rather than kept, which is not what this portfolio does with a
+    bad run (its wall times are noted in docs/evaluation.md).
+22. **Four planted bugs passed at first** in Milestone 6's code: a link
+    test that linked the wrong folder, a test that checked one bundled
+    package and not the other kind, no test for placeholder metadata in an
+    environment, and a plant that changed nothing for real package URLs
+    (replaced). 14 of 14 caught after.
+23. **Half of the scan was one kind of regular expression.** The profile
+    showed twelve token-format patterns running over every file for 57% of
+    the secret scan's time, though most files hold none of their literals.

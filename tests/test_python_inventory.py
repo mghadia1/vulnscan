@@ -259,7 +259,26 @@ def test_a_real_environment_made_by_python(tmp_path: Path) -> None:
     )
     expected = {(normalize(d["name"]), d["version"]) for d in json.loads(listed.stdout)}
     parsed = read_environment(tmp_path, "env")
-    assert {(p.name, p.version) for p in parsed.packages} == expected
+    top = {(p.name, p.version) for p in parsed.packages if p.scope is None}
+    assert top == expected
+    # What pip bundles (from its SBOM, when its version has one) is what
+    # its own _vendor/vendor.txt pins.
+    bundled = {
+        (p.name, p.version) for p in parsed.packages if p.scope == "bundled in pip"
+    }
+    [vendor_txt] = list(env.glob("lib/python*/site-packages/pip/_vendor/vendor.txt"))
+    pins = {
+        (normalize(name), version)
+        for name, _, version in (
+            line.split("#")[0].strip().partition("==")
+            for line in vendor_txt.read_text().splitlines()
+        )
+        if version
+    }
+    if list(env.glob("lib/python*/site-packages/pip/_vendor/bom.cdx.json")):
+        assert bundled == pins
+    else:
+        assert bundled == set()
     assert (
         "pip",
         subprocess.run(

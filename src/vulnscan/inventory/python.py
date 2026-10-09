@@ -10,13 +10,15 @@ would not be known at all.
 import json
 import os
 import re
+import stat
 import tomllib
 from collections.abc import Callable
 from email.parser import HeaderParser
 from pathlib import Path
 from typing import Any
 
-from vulnscan.inventory import pep508
+from vulnscan.git import on_disk
+from vulnscan.inventory import pep508, sbom
 from vulnscan.inventory.model import Ecosystem, How, Package, Parsed, Problem
 
 # requirements-file options that take a value and install nothing by
@@ -286,53 +288,145 @@ def _site_packages(env: Path) -> list[Path]:
     return sorted(found)
 
 
+def _metadata_file(entry: os.DirEntry[str]) -> Path:
+    if entry.name.endswith(".dist-info"):
+        return Path(entry.path) / "METADATA"
+    if entry.is_dir():
+        return Path(entry.path) / "PKG-INFO"
+    return Path(entry.path)  # an .egg-info file is the metadata
+
+
+def _read_text(path: Path, rel: str, parsed: Parsed) -> str | None:
+    """A file's text, or None with a problem recorded: never through a link,
+    never a file that is not on this disk (an iCloud placeholder, which
+    reading would download)."""
+    try:
+        st = os.lstat(path)
+    except OSError as error:
+        parsed.problems.append(Problem(rel, None, f"unreadable: {error}"))
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        parsed.problems.append(Problem(rel, None, "a link, not followed"))
+        return None
+    if not on_disk(st):
+        parsed.problems.append(Problem(rel, None, "not on this disk (iCloud)"))
+        return None
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError as error:
+        parsed.problems.append(Problem(rel, None, f"unreadable: {error}"))
+        return None
+
+
+def _distributions(
+    folder: str, root: Path, parsed: Parsed, scope: str | None
+) -> list[tuple[Path, str, str]]:
+    """The distributions whose metadata is in ``folder``: their .dist-info
+    or .egg-info folder, name and version (added to ``parsed``)."""
+    found: list[tuple[Path, str, str]] = []
+    headers = HeaderParser()
+    for entry in sorted(os.scandir(folder), key=lambda e: e.name):
+        if not entry.name.endswith((".dist-info", ".egg-info")):
+            continue
+        if entry.is_symlink():
+            # A link could point anywhere on the machine: never followed.
+            rel = Path(entry.path).relative_to(root).as_posix()
+            parsed.problems.append(Problem(rel, None, "a link, not followed"))
+            continue
+        meta = _metadata_file(entry)
+        rel = meta.relative_to(root).as_posix()
+        text = _read_text(meta, rel, parsed)
+        if text is None:
+            continue
+        message = headers.parsestr(text)
+        name, version = message.get("Name"), message.get("Version")
+        if not name or not version:
+            parsed.problems.append(Problem(rel, None, "no Name or Version"))
+            continue
+        parsed.packages.append(
+            Package(
+                ecosystem=Ecosystem.PYPI,
+                name=pep508.normalize(name.strip()),
+                version=version.strip(),
+                how=How.INSTALLED,
+                path=rel,
+                scope=scope,
+                local=scope is None and _installed_locally(Path(entry.path)),
+            )
+        )
+        found.append((Path(entry.path), name.strip(), version.strip()))
+    return found
+
+
+def _sbom(
+    path: Path, root: Path, parsed: Parsed, scope: str, itself: str | None
+) -> None:
+    """The packages a CycloneDX SBOM lists as bundled (sbom.py)."""
+    rel = path.relative_to(root).as_posix()
+    text = _read_text(path, rel, parsed)
+    if text is None:
+        return
+    try:
+        listed, unchecked = sbom.components(text, itself)
+    except ValueError as error:
+        parsed.problems.append(Problem(rel, None, f"not read: {error}"))
+        return
+    for ecosystem, name, version in listed:
+        parsed.packages.append(
+            Package(
+                ecosystem=ecosystem,
+                name=name,
+                version=version,
+                how=How.INSTALLED,
+                path=rel,
+                scope=scope,
+            )
+        )
+    if unchecked:
+        parsed.problems.append(
+            Problem(
+                rel,
+                None,
+                f"{unchecked} bundled components not checkable "
+                "(not PyPI, npm or Go packages)",
+            )
+        )
+
+
 def read_environment(root: Path, env: str) -> Parsed:
     """Every distribution installed in the environment at ``root/env``: its
-    name and version from the metadata pip (or any installer) wrote."""
+    name and version from the metadata pip (or any installer) wrote. Also
+    what distributions bundle inside themselves: other distributions'
+    metadata under ``<package>/_vendor`` (setuptools), the SBOM there
+    (pip's ``bom.cdx.json``), and SBOMs in ``.dist-info/sboms`` (PEP 770),
+    each marked "bundled in <package>"."""
     parsed = Parsed()
     sites = _site_packages(root / env)
     if not sites:
         parsed.problems.append(Problem(env, None, "no site-packages folder found"))
-    headers = HeaderParser()
     for site in sites:
+        installed = _distributions(str(site), root, parsed, None)
+        for dist_info, name, _version in installed:
+            sboms = dist_info / "sboms"
+            if (
+                dist_info.name.endswith(".dist-info")
+                and sboms.is_dir()
+                and not sboms.is_symlink()
+            ):
+                for document in sorted(sboms.iterdir()):
+                    if document.name.endswith(".json") and not document.is_symlink():
+                        _sbom(document, root, parsed, f"bundled in {name}", name)
         for entry in sorted(os.scandir(site), key=lambda e: e.name):
-            if not entry.name.endswith((".dist-info", ".egg-info")):
+            if not entry.is_dir(follow_symlinks=False):
                 continue
-            if entry.is_symlink():
-                # A link could point anywhere on the machine: never followed.
-                rel = Path(entry.path).relative_to(root).as_posix()
-                parsed.problems.append(Problem(rel, None, "a link, not followed"))
+            vendor = Path(entry.path) / "_vendor"
+            if not vendor.is_dir() or vendor.is_symlink():
                 continue
-            if entry.name.endswith(".dist-info"):
-                meta = Path(entry.path) / "METADATA"
-            elif entry.is_dir():
-                meta = Path(entry.path) / "PKG-INFO"
-            else:
-                meta = Path(entry.path)  # an .egg-info file is the metadata
-            rel = meta.relative_to(root).as_posix()
-            if meta.is_symlink():
-                parsed.problems.append(Problem(rel, None, "a link, not followed"))
-                continue
-            try:
-                text = meta.read_text(encoding="utf-8", errors="replace")
-            except OSError as error:
-                parsed.problems.append(Problem(rel, None, f"unreadable: {error}"))
-                continue
-            message = headers.parsestr(text)
-            name, version = message.get("Name"), message.get("Version")
-            if not name or not version:
-                parsed.problems.append(Problem(rel, None, "no Name or Version"))
-                continue
-            parsed.packages.append(
-                Package(
-                    ecosystem=Ecosystem.PYPI,
-                    name=pep508.normalize(name.strip()),
-                    version=version.strip(),
-                    how=How.INSTALLED,
-                    path=rel,
-                    local=_installed_locally(Path(entry.path)),
-                )
-            )
+            scope = f"bundled in {entry.name}"
+            _distributions(str(vendor), root, parsed, scope)
+            bom = vendor / "bom.cdx.json"
+            if bom.is_file() and not bom.is_symlink():
+                _sbom(bom, root, parsed, scope, entry.name)
     return parsed
 
 

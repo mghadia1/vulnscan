@@ -257,6 +257,16 @@ def finding_for(package: Package, group: list[tuple[Advisory, Verdict]]) -> Find
             note = f"upgrade to {fixed_in} or later (one advisory names no fix)"
         else:
             note = "no fixed version has been published"
+        scope = package.scope or ""
+        if scope.startswith("bundled in "):
+            # A copy inside another package: that package is what to upgrade.
+            bundler = scope.removeprefix("bundled in ")
+            note = (
+                f"{scope}: upgrade {bundler} to a release that bundles "
+                f"{package.name} {fixed_in} or later"
+                if fixed_in
+                else f"{scope}: {note}"
+            )
     summary = next(
         (
             a.summary

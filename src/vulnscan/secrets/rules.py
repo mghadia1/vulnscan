@@ -213,8 +213,32 @@ def _shown(prefix: str, value: str) -> str:
     )
 
 
+# Text each format's pattern cannot match without (a literal it requires):
+# a format whose markers are all absent from a file is not searched for.
+# Searching for a short literal is far cheaper than running the pattern, and
+# most files hold none (measured: the format patterns were 57% of a scan of
+# my portfolio's files before this).
+_MARKERS = {
+    "aws-access-key-id": ("AKIA", "ASIA", "ABIA", "ACCA"),
+    "github-token": ("ghp_", "gho_", "ghu_", "ghs_", "ghr_"),
+    "github-fine-grained-token": ("github_pat_",),
+    "slack-token": ("xox",),
+    "slack-webhook": ("hooks.slack.com/",),
+    "stripe-secret-key": ("_live_",),
+    "stripe-test-key": ("_test_",),
+    "anthropic-api-key": ("sk-ant-",),
+    "openai-api-key": ("T3BlbkFJ",),
+    "huggingface-token": ("hf_",),
+    "groq-api-key": ("gsk_",),
+    "google-api-key": ("AIza",),
+}
+assert set(_MARKERS) == {rule.id for rule in RULES}
+
+
 def _known(text: str) -> Iterator[Hit]:
     for rule in RULES:
+        if not any(marker in text for marker in _MARKERS[rule.id]):
+            continue
         for m in rule.pattern.finditer(text):
             value = m.group()
             if _PLACEHOLDER.search(value):

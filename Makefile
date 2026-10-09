@@ -5,7 +5,7 @@ IMAGE := vulnscan:local
 # What `make scan` scans.
 TARGET ?= .
 
-.PHONY: install lint format typecheck test check scan update lookup image smoke check-buildkit
+.PHONY: install lint format typecheck test check scan update lookup image smoke check-buildkit bench
 
 $(BIN)/python:
 	$(PYTHON) -m venv $(VENV)
@@ -58,3 +58,8 @@ smoke: image
 # scripts/buildkit_parse into ~/.cache/vulnscan-dev).
 check-buildkit:
 	PYTHONPATH=src $(BIN)/python scripts/check_dockerfile_parser.py --generated 3000 $(TARGET)
+
+# Scan time by part on TARGET: one warm-up, five interleaved passes, a swap
+# check per run (macOS); results in bench/results.
+bench:
+	$(BIN)/python bench/scan_time.py $(TARGET)

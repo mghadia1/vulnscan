@@ -1,0 +1,317 @@
+{
+ "started": "2026-10-09T20:58:43+00:00",
+ "machine": "arm64 26.5.2",
+ "python": "3.14.7",
+ "root": "/Users/programming/Documents/auto job applier/projects",
+ "busy_at_start": [
+  "24% WindowServer"
+ ],
+ "swap_at_start": "total = 6144.00M  used = 4780.12M  free = 1363.88M  (encrypted)",
+ "warm_up": {
+  "exit": 1,
+  "wall_s": 14.417,
+  "cpu_s": 12.85,
+  "rss_mb": 66.6,
+  "swapped_in_mb": 0.2,
+  "valid": true
+ },
+ "runs": [
+  {
+   "config": "whole scan",
+   "pass": 1,
+   "exit": 1,
+   "wall_s": 14.059,
+   "cpu_s": 12.73,
+   "rss_mb": 87.8,
+   "swapped_in_mb": 0.2,
+   "valid": true
+  },
+  {
+   "config": "dependencies",
+   "pass": 1,
+   "exit": 1,
+   "wall_s": 2.263,
+   "cpu_s": 1.93,
+   "rss_mb": 41.6,
+   "swapped_in_mb": 0.0,
+   "valid": true
+  },
+  {
+   "config": "secrets (all history)",
+   "pass": 1,
+   "exit": 0,
+   "wall_s": 12.216,
+   "cpu_s": 11.19,
+   "rss_mb": 77.7,
+   "swapped_in_mb": 1.1,
+   "valid": true
+  },
+  {
+   "config": "secrets (HEAD only)",
+   "pass": 1,
+   "exit": 0,
+   "wall_s": 9.692,
+   "cpu_s": 8.86,
+   "rss_mb": 75.2,
+   "swapped_in_mb": 0.0,
+   "valid": true
+  },
+  {
+   "config": "containers",
+   "pass": 1,
+   "exit": 1,
+   "wall_s": 0.622,
+   "cpu_s": 0.48,
+   "rss_mb": 38.2,
+   "swapped_in_mb": 0.0,
+   "valid": true
+  },
+  {
+   "config": "whole scan",
+   "pass": 2,
+   "exit": 1,
+   "wall_s": 14.221,
+   "cpu_s": 13.02,
+   "rss_mb": 78.4,
+   "swapped_in_mb": 0.2,
+   "valid": true
+  },
+  {
+   "config": "dependencies",
+   "pass": 2,
+   "exit": 1,
+   "wall_s": 2.399,
+   "cpu_s": 2.05,
+   "rss_mb": 41.3,
+   "swapped_in_mb": 0.0,
+   "valid": true
+  },
+  {
+   "config": "secrets (all history)",
+   "pass": 2,
+   "exit": 0,
+   "wall_s": 12.723,
+   "cpu_s": 11.53,
+   "rss_mb": 76.7,
+   "swapped_in_mb": 1.0,
+   "valid": true
+  },
+  {
+   "config": "secrets (HEAD only)",
+   "pass": 2,
+   "exit": 0,
+   "wall_s": 9.669,
+   "cpu_s": 8.85,
+   "rss_mb": 86.4,
+   "swapped_in_mb": 0.1,
+   "valid": true
+  },
+  {
+   "config": "containers",
+   "pass": 2,
+   "exit": 1,
+   "wall_s": 0.634,
+   "cpu_s": 0.49,
+   "rss_mb": 38.0,
+   "swapped_in_mb": 0.0,
+   "valid": true
+  },
+  {
+   "config": "whole scan",
+   "pass": 3,
+   "exit": 1,
+   "wall_s": 13.853,
+   "cpu_s": 12.67,
+   "rss_mb": 88.7,
+   "swapped_in_mb": 0.2,
+   "valid": true
+  },
+  {
+   "config": "dependencies",
+   "pass": 3,
+   "exit": 1,
+   "wall_s": 2.392,
+   "cpu_s": 2.04,
+   "rss_mb": 40.8,
+   "swapped_in_mb": 0.4,
+   "valid": true
+  },
+  {
+   "config": "secrets (all history)",
+   "pass": 3,
+   "exit": 0,
+   "wall_s": 12.236,
+   "cpu_s": 11.2,
+   "rss_mb": 77.3,
+   "swapped_in_mb": 0.9,
+   "valid": true
+  },
+  {
+   "config": "secrets (HEAD only)",
+   "pass": 3,
+   "exit": 0,
+   "wall_s": 9.73,
+   "cpu_s": 8.89,
+   "rss_mb": 71.0,
+   "swapped_in_mb": 0.1,
+   "valid": true
+  },
+  {
+   "config": "containers",
+   "pass": 3,
+   "exit": 1,
+   "wall_s": 0.627,
+   "cpu_s": 0.49,
+   "rss_mb": 37.9,
+   "swapped_in_mb": 0.0,
+   "valid": true
+  },
+  {
+   "config": "whole scan",
+   "pass": 4,
+   "exit": 1,
+   "wall_s": 14.012,
+   "cpu_s": 12.79,
+   "rss_mb": 78.9,
+   "swapped_in_mb": 1.2,
+   "valid": true
+  },
+  {
+   "config": "dependencies",
+   "pass": 4,
+   "exit": 1,
+   "wall_s": 2.249,
+   "cpu_s": 1.94,
+   "rss_mb": 41.8,
+   "swapped_in_mb": 0.0,
+   "valid": true
+  },
+  {
+   "config": "secrets (all history)",
+   "pass": 4,
+   "exit": 0,
+   "wall_s": 12.208,
+   "cpu_s": 11.2,
+   "rss_mb": 73.8,
+   "swapped_in_mb": 0.2,
+   "valid": true
+  },
+  {
+   "config": "secrets (HEAD only)",
+   "pass": 4,
+   "exit": 0,
+   "wall_s": 9.706,
+   "cpu_s": 8.87,
+   "rss_mb": 85.8,
+   "swapped_in_mb": 0.0,
+   "valid": true
+  },
+  {
+   "config": "containers",
+   "pass": 4,
+   "exit": 1,
+   "wall_s": 0.62,
+   "cpu_s": 0.48,
+   "rss_mb": 38.0,
+   "swapped_in_mb": 0.0,
+   "valid": true
+  },
+  {
+   "config": "whole scan",
+   "pass": 5,
+   "exit": 1,
+   "wall_s": 13.865,
+   "cpu_s": 12.66,
+   "rss_mb": 83.7,
+   "swapped_in_mb": 0.0,
+   "valid": true
+  },
+  {
+   "config": "dependencies",
+   "pass": 5,
+   "exit": 1,
+   "wall_s": 2.257,
+   "cpu_s": 1.95,
+   "rss_mb": 41.6,
+   "swapped_in_mb": 0.0,
+   "valid": true
+  },
+  {
+   "config": "secrets (all history)",
+   "pass": 5,
+   "exit": 0,
+   "wall_s": 12.338,
+   "cpu_s": 11.27,
+   "rss_mb": 71.4,
+   "swapped_in_mb": 0.7,
+   "valid": true
+  },
+  {
+   "config": "secrets (HEAD only)",
+   "pass": 5,
+   "exit": 0,
+   "wall_s": 9.685,
+   "cpu_s": 8.86,
+   "rss_mb": 83.5,
+   "swapped_in_mb": 0.1,
+   "valid": true
+  },
+  {
+   "config": "containers",
+   "pass": 5,
+   "exit": 1,
+   "wall_s": 0.638,
+   "cpu_s": 0.49,
+   "rss_mb": 38.1,
+   "swapped_in_mb": 0.1,
+   "valid": true
+  }
+ ],
+ "summary": {
+  "whole scan": {
+   "valid_runs": 5,
+   "of": 5,
+   "wall_median_s": 14.01,
+   "wall_min_s": 13.853,
+   "wall_max_s": 14.221,
+   "cpu_median_s": 12.73,
+   "rss_max_mb": 88.7
+  },
+  "dependencies": {
+   "valid_runs": 5,
+   "of": 5,
+   "wall_median_s": 2.26,
+   "wall_min_s": 2.249,
+   "wall_max_s": 2.399,
+   "cpu_median_s": 1.95,
+   "rss_max_mb": 41.8
+  },
+  "secrets (all history)": {
+   "valid_runs": 5,
+   "of": 5,
+   "wall_median_s": 12.24,
+   "wall_min_s": 12.208,
+   "wall_max_s": 12.723,
+   "cpu_median_s": 11.2,
+   "rss_max_mb": 77.7
+  },
+  "secrets (HEAD only)": {
+   "valid_runs": 5,
+   "of": 5,
+   "wall_median_s": 9.69,
+   "wall_min_s": 9.669,
+   "wall_max_s": 9.73,
+   "cpu_median_s": 8.86,
+   "rss_max_mb": 86.4
+  },
+  "containers": {
+   "valid_runs": 5,
+   "of": 5,
+   "wall_median_s": 0.63,
+   "wall_min_s": 0.62,
+   "wall_max_s": 0.638,
+   "cpu_median_s": 0.49,
+   "rss_max_mb": 38.2
+  }
+ }
+}

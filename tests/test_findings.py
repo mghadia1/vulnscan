@@ -397,3 +397,43 @@ def test_an_acceptance_for_one_package_covers_only_it(
     report = json.loads(scan(repo, data, "--format", "json")[1])
     accepted = {f["package"]["name"] for f in report["findings"] if f["accepted"]}
     assert accepted == {"stdlib"}  # not golang.org/x/net, though it shares the id
+
+
+def test_a_vulnerable_package_bundled_in_another(scanned: tuple[Path, Path]) -> None:
+    """Django 3.2.18 listed in a pip's SBOM of what it bundles: found, and
+    the fix is to upgrade pip, the package that bundles it."""
+    repo, data = scanned
+    site = repo / ".venv/lib/python3.14/site-packages"
+    (repo / ".venv/pyvenv.cfg").parent.mkdir(parents=True)
+    (repo / ".venv/pyvenv.cfg").write_text("home = /x\n")
+    (site / "pip-26.0.dist-info").mkdir(parents=True)
+    (site / "pip-26.0.dist-info/METADATA").write_text("Name: pip\nVersion: 26.0\n")
+    (site / "pip/_vendor").mkdir(parents=True)
+    (site / "pip/_vendor/bom.cdx.json").write_text(
+        json.dumps(
+            {
+                "bomFormat": "CycloneDX",
+                "components": [
+                    {
+                        "name": "django",
+                        "version": "3.2.18",
+                        "purl": "pkg:pypi/django@3.2.18",
+                    },
+                ],
+            }
+        )
+    )
+    code, out = scan(repo, data, "--format", "json")
+    report = json.loads(out)
+    [bundled] = [
+        f
+        for f in report["findings"]
+        if f["package"]["path"].endswith("pip/_vendor/bom.cdx.json")
+    ]
+    assert bundled["package"]["scope"] == "bundled in pip"
+    assert bundled["advisories"] == ["PYSEC-2023-61"]
+    assert bundled["fix"] == (
+        "bundled in pip: upgrade pip to a release that bundles django 3.2.19 or later"
+    )
+    code, text = scan(repo, data)
+    assert "[bundled in pip]" in text
