@@ -5,7 +5,7 @@ IMAGE := vulnscan:local
 # What `make scan` scans.
 TARGET ?= .
 
-.PHONY: install lint format typecheck test check scan image smoke
+.PHONY: install lint format typecheck test check scan update lookup image smoke
 
 $(BIN)/python:
 	$(PYTHON) -m venv $(VENV)
@@ -35,6 +35,16 @@ check: lint typecheck test
 # .venv hidden, and Python 3.13+ skips hidden .pth files.
 scan:
 	PYTHONPATH=src $(BIN)/python -m vulnscan scan $(TARGET)
+
+# OSV's advisories for PyPI, npm and Go, into ~/.cache/vulnscan (the only
+# command that uses the network).
+update:
+	PYTHONPATH=src $(BIN)/python -m vulnscan update
+
+# make lookup Q="PyPI django 3.2.18" (exit code 1 means affected; make
+# ignores it here)
+lookup:
+	-PYTHONPATH=src $(BIN)/python -m vulnscan lookup $(Q)
 
 image:
 	docker build -t $(IMAGE) .

@@ -15,11 +15,12 @@ It deliberately does not use pip-audit, safety, osv-scanner, npm audit,
 govulncheck, Trivy, Grype, Snyk, gitleaks, trufflehog, detect-secrets,
 hadolint or Checkov underneath: the point is to build what they do.
 
-> **Status:** Milestones 0-1 of 7. `vulnscan scan` walks a repository and
+> **Status:** Milestones 0-2 of 7. `vulnscan scan` walks a repository and
 > builds its inventory: every Python, npm and Go package it depends on,
-> with the version and how sure that version is (installed, locked, pinned
-> or only declared). It checks nothing against advisories yet, so it
-> reports no findings.
+> with the version and how sure that version is. `vulnscan update` keeps a
+> local index of OSV's advisories, and `vulnscan lookup` says which affect
+> one package version, with version ordering written by hand. Scans do not
+> use the advisories yet (Milestone 3), so they report no findings.
 
 ## Status
 
@@ -27,7 +28,7 @@ hadolint or Checkov underneath: the point is to build what they do.
 |---|-----------|--------|
 | 0 | Skeleton: Python 3.14 package, a `vulnscan scan PATH` CLI with text and JSON output and exit codes; ruff, mypy --strict, pytest + Hypothesis; a non-root image that scans a folder mounted read-only; CI; a smoke test | Built |
 | 1 | Inventory: exactly what a repository depends on, from installed Python environments, lockfiles and manifests (Python, npm, Go) | Built |
-| 2 | Advisory data from OSV in a local index; version ordering for PEP 440, npm SemVer and Go, written by hand; OSV's affected ranges | Not started |
+| 2 | Advisory data from OSV in a local index; version ordering for PEP 440, npm SemVer and Go, written by hand; OSV's affected ranges | Built |
 | 3 | Findings: packages matched to advisories, the fixing version, CVSS 3.1 scores; text, JSON and SARIF; `--fail-on`; a baseline file | Not started |
 | 4 | Secrets in files and git history, never shown in a finding | Not started |
 | 5 | Dockerfile and Compose rules | Not started |
@@ -52,6 +53,15 @@ Or with Python 3.14:
 ```bash
 make install
 make scan TARGET=../some-repo
+```
+
+Advisory data (the only network VulnScan uses), then a lookup:
+
+```bash
+make update                      # OSV's exports for PyPI, npm and Go, into ~/.cache/vulnscan
+make lookup Q="PyPI django 3.2.18"
+docker run --rm -v ~/.cache/vulnscan:/data vulnscan:local update
+docker run --rm --network none -v ~/.cache/vulnscan:/data:ro vulnscan:local lookup npm ws 8.17.0
 ```
 
 `make smoke` builds the image and checks it from outside: it runs
@@ -156,6 +166,103 @@ it was found at, and **how sure** the version is:
   installed, 830 locked, 169 declared, 1 pinned; 28 local) in 0.4 s, with no
   problems; 43 files not read, each saying why.
 
+## Advisory data
+
+`vulnscan update` downloads OSV's export for each ecosystem (one zip of
+JSON advisories each, from OSV's public bucket) and indexes it in SQLite at
+`~/.cache/vulnscan/osv.sqlite` (or `$VULNSCAN_DATA`), outside any
+repository. It is the only command that uses the network; scans and
+lookups read the index, read-only, and run with no network at all.
+
+- **A download is checked before it is used:** streamed to a `.part`
+  file, kept only if its length is the server's and its MD5 matches the
+  one the server publishes for the object (the `x-goog-hash` header); its
+  SHA-256 is recorded, to say exactly which data a scan used. A bad
+  download leaves nothing behind, and the zip is deleted once indexed
+  (`--keep` keeps it).
+- **An ecosystem is replaced all at once,** in one transaction: an update
+  that fails part-way leaves the previous data. Withdrawn advisories are
+  left out; an advisory that does not parse is counted, not indexed; a zip
+  entry over 5 MB is refused without being read into memory.
+- **What is kept** of an advisory: its id, aliases (CVE ids), summary,
+  CVSS vectors, GitHub's severity word, ten references, and its affected
+  entries for PyPI, npm and Go (advisories often cover other ecosystems
+  too). Not the long description.
+- **On 2026-10-08:** PyPI 25,584 advisories (616 withdrawn left out), npm
+  229,488 (730), Go 9,399 (161); 266 MB downloaded, all three MD5-checked;
+  an index of 123 MB; 22 s on this machine's connection, once. npm's count
+  is mostly malicious-package reports (OSV's `MAL-` advisories).
+  `--from ECOSYSTEM=ZIP` indexes an export already on disk instead.
+
+### Ordering versions
+
+Written by hand, from the specifications (`src/vulnscan/versions/`):
+
+- **Python (PEP 440):** epochs, pre-releases (a, b, rc and their other
+  spellings), post- and dev releases, local versions, and the PEP's
+  normalisation ("1.0-ALPHA.1" is "1.0a1"; "1.0" is "1.0.0"; "v" and case do
+  not matter), using the PEP's own pattern.
+- **npm (SemVer 2.0.0):** strict, as semver.org's own expression accepts;
+  pre-releases before the release, identifiers compared numerically or as
+  text, build metadata ignored.
+- **Go:** module versions are SemVer with a "v" (pseudo-versions are
+  pre-releases; "+incompatible" is build metadata). The standard library's
+  versions are Go's own ("go1.21rc2"), converted as the Go vulnerability
+  database writes them (1.21.0-rc.2).
+
+### Is a version affected?
+
+As the OSV schema's "Evaluation" section says: in the advisory's explicit
+list of versions, or inside one of its ranges, whose events are sorted by
+version and walked in order (introduced, fixed, last_affected; limit caps
+the range). The answer is **affected**, **not affected**, or **unknown**,
+never a guess: unknown when the version, or an event of a range, is not a
+version in that ecosystem's ordering, or when only a GIT range (commits)
+covers it and there is no list.
+
+### How it is tested
+
+- **Version ordering against reference implementations** (Hypothesis,
+  2,000 generated cases each; `packaging` and `semver` are used only by
+  the tests): PEP 440 accepts exactly the strings `packaging` accepts,
+  normalises them the same, and orders every pair the same; SemVer the
+  same against the `semver` library; plus the PEP's and semver.org's own
+  ordering examples, and Go's pseudo-versions and toolchain names.
+- **Evaluation:** the schema's examples (unfixed, fixed, several ranges,
+  last_affected, limit), events in any order, the explicit list compared
+  as versions ("1.0" lists "1.0.0"), GIT ranges with and without a list;
+  and random disjoint intervals of versions, as one range's events in a
+  random order, where every version must come out exactly inside or out.
+- **The index and the download:** a real zip indexed and looked up (OSV's
+  "Django" found as "django"), withdrawn and broken entries counted, an
+  update that fails part-way leaving the old data, a read-only index that
+  is never written to, and a local HTTP server serving a good download, one
+  with the wrong MD5, one cut short and a 404 (nothing left behind).
+- **17 planted bugs** each fail the tests: pre-release order, trailing
+  zeros, dev releases, local versions, a release before its pre-releases,
+  pre-release numbers compared as text, Go's "v", events walked unsorted,
+  last_affected as fixed, limit ignored, the list compared as text, GIT
+  ranges treated as fixed, names not normalised, withdrawn advisories
+  kept, MD5 not checked, a partial file left, and an update that was not
+  all-or-nothing.
+- **Against OSV's own lists, on all the real data**
+  (`scripts/check_ranges.py`): OSV adds to most advisories the list of
+  affected versions it worked out from the ranges, so each listed version
+  should come out affected from the ranges alone. PyPI: 1,341,111 of
+  1,344,713 do (99.7%); 3,558 are unknown (versions that are not PEP 440,
+  such as "0.1-bulbasaur"); 44 are not, all in advisories whose ranges are
+  malformed (several last_affected events in one range, two ranges written
+  as one, a listed pre-release below where its range starts). npm: 26,014
+  of 26,144; the 130 others are malicious-package reports listing versions
+  below where their range starts. Go: 168 of 169, one unknown. Those
+  disagreements do not reach an answer: the explicit list is checked
+  first, so a listed version is affected.
+- **Against OSV's own evaluation, on my portfolio**
+  (`scripts/check_against_osv_api.py`, a development check that sends the
+  packages' public names and versions to OSV's query API): for all 761
+  registry packages with an exact version, VulnScan's local index names
+  exactly the advisories OSV's service does, 83 of them in all.
+
 ## Development
 
 ```bash
@@ -181,6 +288,10 @@ install does not work outside pytest.
 | `src/vulnscan/inventory/python.py`, `pep508.py` | Requirements files, pyproject.toml, uv.lock, poetry.lock, installed environments; requirement strings |
 | `src/vulnscan/inventory/npm.py`, `golang.py` | package-lock.json and package.json; go.mod |
 | `scripts/check_inventory.py` | The inventory against pip, npm and go, on real repositories |
+| `src/vulnscan/versions/` | Version ordering by hand: PEP 440, SemVer, Go |
+| `src/vulnscan/advisories/osv.py` | Reading an advisory, and the OSV evaluation |
+| `src/vulnscan/advisories/db.py`, `fetch.py`, `__init__.py` | The SQLite index; the checked download; update and lookup |
+| `scripts/check_ranges.py`, `scripts/check_against_osv_api.py` | The evaluation against OSV's lists, and against OSV's own service |
 | `tests/` | The walker (random trees with Hypothesis), the classifier, each reader (fixtures, generated files, fuzzing, pip as a reference), the CLI |
 | `scripts/smoke.sh` | Checks the image from outside |
 
@@ -209,3 +320,14 @@ install does not work outside pytest.
    workspace as `file:` only where it is installed, not where it is
    needed). Both were in the checking script, not in VulnScan; with them
    fixed, 30 of 30 match.
+5. **A test was wrong about PEP 440.** I listed "1.0-dev-" as invalid; my
+   parser accepted it, and so does `packaging` (a separator may follow
+   "dev" with no number: it is 1.0.dev0). The test was corrected, not the
+   parser.
+6. **The first check against OSV's lists reported thousands of
+   disagreements in Go** (4,504 of 5,951). An export is one ecosystem's,
+   but its advisories also cover packages of others (the same GitHub
+   advisory lists a Go module and a Ruby gem); the check script counted
+   the gem's versions. Restricted to the export's own ecosystem: 168 of
+   169. The evaluation itself had been right, and says "unknown" for an
+   ecosystem it cannot order.

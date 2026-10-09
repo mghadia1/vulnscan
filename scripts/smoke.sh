@@ -47,6 +47,28 @@ expect "link not followed" "$(echo "$report" | field '[f["path"] for f in d["fil
 expect "text report by default" "$(scan | head -1)" "vulnscan 0.1.0: /scan"
 expect "nothing written into the target" "$([ "$(listing)" = "$before" ] && echo unchanged || echo changed)" "unchanged"
 
+# Advisory data: indexed from a file (no network), then looked up from a
+# read-only mount.
+mkdir -p "$fixture/data"
+chmod 777 "$fixture/data"  # writable by the container's user, on any host
+python3 - "$fixture/data/PyPI.zip" <<'PY'
+import json, sys, zipfile
+advisory = {"id": "PYSEC-1", "modified": "2026-01-01T00:00:00Z", "summary": "a test",
+            "affected": [{"package": {"ecosystem": "PyPI", "name": "Django"},
+                          "ranges": [{"type": "ECOSYSTEM",
+                                      "events": [{"introduced": "0"}, {"fixed": "5.1.3"}]}]}]}
+with zipfile.ZipFile(sys.argv[1], "w") as zf:
+    zf.writestr("PYSEC-1.json", json.dumps(advisory))
+PY
+data() { docker run --rm --network none -v "$fixture/data:/data$1" "$image" "${@:2}"; }
+expect "update from a file" "$(data "" update --from PyPI=/data/PyPI.zip | head -1)" "PyPI: 1 advisories (0 withdrawn left out, 0 not readable); 0.0 MB, sha256 $(shasum -a 256 "$fixture/data/PyPI.zip" | cut -c1-16)..., not checked against the server"
+set +e
+data :ro lookup PyPI django 5.1.2 > "$fixture/lookup.txt"
+code=$?
+set -e
+expect "lookup from a read-only mount exits with" "$code" "1"
+expect "lookup names the advisory" "$(grep -c 'AFFECTED  PYSEC-1' "$fixture/lookup.txt")" "1"
+
 set +e
 scan scan /nowhere > /dev/null 2>&1
 code=$?

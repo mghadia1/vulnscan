@@ -105,3 +105,55 @@ def test_runs_as_a_module(repo: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["summary"]["files"] == 4
+
+
+def osv_zip(path: Path) -> Path:
+    import zipfile
+
+    advisory = {
+        "id": "PYSEC-1",
+        "modified": "2026-01-01T00:00:00Z",
+        "aliases": ["CVE-2026-0001"],
+        "summary": "a test advisory",
+        "affected": [
+            {
+                "package": {"ecosystem": "PyPI", "name": "Django"},
+                "ranges": [
+                    {
+                        "type": "ECOSYSTEM",
+                        "events": [{"introduced": "0"}, {"fixed": "3.2.19"}],
+                    }
+                ],
+            }
+        ],
+    }
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr("PYSEC-1.json", json.dumps(advisory))
+    return path
+
+
+def test_update_and_lookup(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    data = str(tmp_path / "data")
+    assert main(["lookup", "PyPI", "django", "1.0", "--data", data]) == EXIT_ERROR
+    assert "run `vulnscan update`" in capsys.readouterr().err
+
+    source = osv_zip(tmp_path / "PyPI.zip")
+    assert main(["update", "--from", f"PyPI={source}", "--data", data]) == EXIT_CLEAN
+    out = capsys.readouterr().out
+    assert "PyPI: 1 advisories (0 withdrawn left out, 0 not readable)" in out
+    assert "not checked against the server" in out
+
+    assert main(["lookup", "PyPI", "Django", "3.2.18", "--data", data]) == 1
+    out = capsys.readouterr().out
+    assert "AFFECTED  PYSEC-1 (CVE-2026-0001): a test advisory" in out
+    assert main(["lookup", "PyPI", "django", "3.2.19", "--data", data]) == EXIT_CLEAN
+    assert "0 affecting it" in capsys.readouterr().out
+    assert main(["lookup", "npm", "ws", "8.0.0", "--data", data]) == EXIT_ERROR
+    assert "no npm advisories" in capsys.readouterr().err
+
+
+def test_update_from_needs_an_ecosystem(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert main(["update", "--from", "x.zip", "--data", str(tmp_path)]) == EXIT_ERROR
+    assert "ECOSYSTEM=ZIP" in capsys.readouterr().err
