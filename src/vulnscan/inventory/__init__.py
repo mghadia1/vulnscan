@@ -57,9 +57,9 @@ NOT_READ: dict[Kind, str] = {
     Kind.GRADLE: "Java (Gradle) dependencies are not covered",
     Kind.RENV_LOCK: "R (CRAN) dependencies are not covered",
     Kind.CARGO_LOCK: "Rust dependencies are not covered",
-    Kind.DOCKERFILE: "container rules come in Milestone 5",
-    Kind.COMPOSE: "container rules come in Milestone 5",
 }
+# Not dependency files: read by the container checks (containers/).
+_CONTAINER_FILES = frozenset({Kind.DOCKERFILE, Kind.COMPOSE})
 
 
 @dataclass(frozen=True)
@@ -126,6 +126,8 @@ def build(tree: Tree) -> Inventory:
             reader: Reader = parse_package_json
         elif kind in READERS:
             reader = READERS[kind]
+        elif kind in _CONTAINER_FILES:
+            continue
         else:
             not_read.append((path, NOT_READ[kind]))
             continue

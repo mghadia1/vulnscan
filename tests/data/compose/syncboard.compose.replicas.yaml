@@ -1,0 +1,49 @@
+# Two SyncBoard servers sharing boards: one data volume (one SQLite file,
+# so both must run on one machine), and Redis pub/sub between them so an
+# edit on one reaches people on the other at once. Each serves the whole
+# app: open a board's link on either port.
+#
+#   docker compose -f compose.replicas.yaml up --build --detach --wait
+#
+# (`make up-replicas`.) Without Redis the servers keep working: they find
+# each other's edits on disk, every half second or so.
+
+name: syncboard-replicas
+
+services:
+  redis:
+    image: redis:8-alpine
+    # Pub/sub only: Redis keeps nothing here, so nothing is saved.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+    restart: unless-stopped
+
+  a: &server
+    # Built for each server (the second from the build cache). Not one
+    # shared image name: both builds would tag it at once, and one fails
+    # ("already exists": 2 of the first 4 smoke runs that built it).
+    build: .
+    environment:
+      SYNCBOARD_REDIS_URL: redis://redis:6379
+    ports:
+      # Not 8300, so this runs beside the one-server stack of compose.yaml.
+      - "${SYNCBOARD_PORT_A:-8310}:8000"
+    volumes:
+      - boards:/data
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 15s
+
+  b:
+    <<: *server
+    ports:
+      - "${SYNCBOARD_PORT_B:-8311}:8000"
+
+volumes:
+  boards:

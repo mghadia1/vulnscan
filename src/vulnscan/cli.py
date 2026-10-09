@@ -1,7 +1,8 @@
 """The command line.
 
-- ``vulnscan scan PATH``: the scan: dependencies against advisories, and
-  secrets in files and git history. Reads files only; never the network.
+- ``vulnscan scan PATH``: the scan: dependencies against advisories,
+  secrets in files and git history, and risky Dockerfile and Compose
+  settings. Reads files only; never the network.
 - ``vulnscan update``: downloads OSV's advisory exports and indexes them
   (the only command that uses the network).
 - ``vulnscan lookup ECOSYSTEM NAME VERSION``: which advisories affect one
@@ -20,7 +21,7 @@ from datetime import UTC, date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-from vulnscan import __version__, secrets
+from vulnscan import __version__, containers, secrets
 from vulnscan.advisories import (
     DB_NAME,
     ECOSYSTEMS,
@@ -34,7 +35,13 @@ from vulnscan.advisories.osv import Verdict
 from vulnscan.baseline import FILE_NAME, BaselineError, apply, load
 from vulnscan.findings import Acceptance
 from vulnscan.findings import match as match_advisories
-from vulnscan.report import THRESHOLDS, Checked, Report, SecretsChecked
+from vulnscan.report import (
+    THRESHOLDS,
+    Checked,
+    ContainersChecked,
+    Report,
+    SecretsChecked,
+)
 from vulnscan.walk import walk
 
 # Advisories older than this are named in the report (not a failure).
@@ -85,6 +92,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     scan.add_argument(
         "--no-secrets", action="store_true", help="do not look for secrets"
+    )
+    scan.add_argument(
+        "--no-containers",
+        action="store_true",
+        help="do not check Dockerfiles and Compose files",
     )
     scan.add_argument(
         "--no-history",
@@ -159,6 +171,17 @@ def _scan(args: argparse.Namespace) -> int:
         report = replace(
             report,
             secrets=SecretsChecked(found, applied, str(baseline) if baseline else None),
+        )
+    if not args.no_containers:
+        checked_files = containers.scan(root, report.tree)
+        applied_rules = containers.apply(
+            checked_files.findings, acceptances, date.today()
+        )
+        report = replace(
+            report,
+            containers=ContainersChecked(
+                checked_files, applied_rules, str(baseline) if baseline else None
+            ),
         )
     if args.format == "json":
         text = report.to_json()

@@ -14,6 +14,8 @@ beyond a format's fixed prefix. The output is checked against OASIS's SARIF
 from typing import Any
 
 from vulnscan import __version__
+from vulnscan.containers import RULES as CONFIG_RULES
+from vulnscan.containers import ConfigFinding
 from vulnscan.findings import Finding, severity_rank
 from vulnscan.secrets import SecretFinding, commit_date
 
@@ -78,6 +80,7 @@ def _secret_result(f: SecretFinding, rule_index: int) -> dict[str, Any]:
     where = {
         "committed": "in the latest commit",
         "history": "in the history (no longer in the latest commit)",
+        "in-git": "in a commit (whether the latest commit has it is not known)",
         "file": "in a file not known to be committed",
         "uncommitted": "in a file that is not committed",
     }[f.state]
@@ -119,8 +122,51 @@ def _secret_result(f: SecretFinding, rule_index: int) -> dict[str, Any]:
     return result
 
 
+def _config_rule(rule_id: str, severity: str) -> dict[str, Any]:
+    rule = CONFIG_RULES[rule_id]
+    return {
+        "id": rule.id,
+        "shortDescription": {"text": rule.title},
+        "help": {"text": f"Fix: {rule.fix}."},
+        "defaultConfiguration": {"level": _LEVEL[severity]},
+        "properties": {
+            "tags": ["security", rule.id.split("/")[0]],
+            "security-severity": _BANDS[severity],
+        },
+    }
+
+
+def _config_result(f: ConfigFinding, rule_index: int) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "ruleId": f.rule,
+        "ruleIndex": rule_index,
+        "level": _LEVEL[f.severity],
+        "message": {"text": f"{f.message}. Fix: {f.fix}."},
+        "locations": [
+            {
+                "physicalLocation": {
+                    "artifactLocation": {"uri": f.path},
+                    "region": {"startLine": f.line},
+                }
+            }
+        ],
+        "partialFingerprints": {"vulnscan/config/v1": f.fingerprint},
+        "properties": {"subject": f.subject, "readFrom": f.source},
+    }
+    if f.accepted is not None:
+        result["suppressions"] = [
+            {
+                "kind": "external",
+                "justification": f"{f.accepted.reason} (until {f.accepted.expires})",
+            }
+        ]
+    return result
+
+
 def to_sarif(
-    findings: tuple[Finding, ...], secrets: tuple[SecretFinding, ...] = ()
+    findings: tuple[Finding, ...],
+    secrets: tuple[SecretFinding, ...] = (),
+    configs: tuple[ConfigFinding, ...] = (),
 ) -> dict[str, Any]:
     rules: list[dict[str, Any]] = []
     index: dict[str, int] = {}
@@ -177,6 +223,16 @@ def to_sarif(
             index[rule_id] = len(rules)
             rules.append(_secret_rule(secret, worst[secret.rule]))
         results.append(_secret_result(secret, index[rule_id]))
+    worst_config: dict[str, str] = {}
+    for config in configs:
+        rank = severity_rank(worst_config.get(config.rule, "none"))
+        if severity_rank(config.severity) > rank:
+            worst_config[config.rule] = config.severity
+    for config in configs:
+        if config.rule not in index:
+            index[config.rule] = len(rules)
+            rules.append(_config_rule(config.rule, worst_config[config.rule]))
+        results.append(_config_result(config, index[config.rule]))
     return {
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",

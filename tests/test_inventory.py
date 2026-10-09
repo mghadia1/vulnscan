@@ -43,7 +43,6 @@ def test_files_not_read_say_why(tmp_path: Path) -> None:
     write(tmp_path, "solo/package.json", '{"dependencies": {"ws": "^8"}}')
     inv = build(walk(tmp_path))
     assert dict(inv.not_read) == {
-        "Dockerfile": "container rules come in Milestone 5",
         "api/pom.xml": "Java (Maven) dependencies are not covered",
         "go.sum": "go.mod lists every module the build needs",
         "renv.lock": "R (CRAN) dependencies are not covered",

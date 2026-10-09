@@ -9,8 +9,12 @@ Where a secret is decides what to do about it, so every finding says:
 - **uncommitted**: in the working tree only, in a file git does not have
   in HEAD (an ``.env`` that is ignored, say, which is where a local secret
   belongs). Reported, never failing.
+- **in-git**: in a commit, in a repository whose HEAD is not on this disk
+  (its branch's ref moved to iCloud): whether the commit checked out still
+  has it is not known, so it counts like committed.
 - **file**: in a file outside any git repository, or in one whose history
-  could not be read: whether it is committed is not known, so it counts.
+  (or HEAD) could not be read: whether it is committed is not known, so it
+  counts.
 
 For committed and history findings: whether a commit containing it is
 reachable from a remote-tracking ref (``refs/remotes/...``), that is,
@@ -49,7 +53,7 @@ from vulnscan.walk import Tree
 MAX_BYTES = 10 * 1024 * 1024
 _BINARY_PROBE = 8000
 
-STATES = ("committed", "history", "file", "uncommitted")
+STATES = ("committed", "history", "in-git", "file", "uncommitted")
 
 
 @dataclass(frozen=True)
@@ -79,9 +83,10 @@ class SecretFinding:
         if self.state == "file":
             return "not known to be committed: check where this file goes"
         if self.pushed:
-            where = (
-                "in the latest commit" if self.state == "committed" else "in history"
-            )
+            where = {
+                "committed": "in the latest commit",
+                "history": "in history",
+            }.get(self.state, "in a commit")
             return f"pushed ({where}): revoke it and issue a new one"
         if self.pushed is False:
             return (
@@ -207,7 +212,13 @@ def _from_history(
                     column=column,
                     shown=hit.shown,
                     fingerprint=fp,
-                    state="committed" if o.in_head else "history",
+                    state=(
+                        "committed"
+                        if o.in_head
+                        else "history"
+                        if history.head_known
+                        else "in-git"
+                    ),
                     repository=rel,
                     commit=o.first_commit,
                     commit_time=o.first_time,
@@ -276,6 +287,16 @@ def scan(target: Path, tree: Tree, history: bool = True) -> SecretScan:
             repo.close()
         findings += found
         head_files[rel] = {(o.path, o.blob) for o in walked.occurrences if o.in_head}
+        notes = tuple(repo.notes)
+        if repo.head_from_reflog:
+            notes += ("HEAD read from its reflog: its ref is not on this disk",)
+        if not walked.head_known:
+            # Its files cannot be compared with HEAD: read as plain files.
+            unreadable_repos.add(rel)
+            notes += (
+                "HEAD's branch is not on this disk (iCloud): which commit is "
+                "checked out is not known",
+            )
         summaries.append(
             RepositoryScan(
                 rel,
@@ -285,12 +306,14 @@ def scan(target: Path, tree: Tree, history: bool = True) -> SecretScan:
                 walked.missing,
                 walked.remotes,
                 None,
-                tuple(repo.notes),
+                notes,
                 len(repo.offline),
             )
         )
 
-    committed = {(f.fingerprint, f.path) for f in findings if f.state == "committed"}
+    committed = {
+        (f.fingerprint, f.path) for f in findings if f.state in ("committed", "in-git")
+    }
     readable = [r for r in tree.repositories if r not in unreadable_repos]
     head_paths = {
         repo: {path for path, _ in files} for repo, files in head_files.items()

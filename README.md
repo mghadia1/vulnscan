@@ -15,7 +15,7 @@ It deliberately does not use pip-audit, safety, osv-scanner, npm audit,
 govulncheck, Trivy, Grype, Snyk, gitleaks, trufflehog, detect-secrets,
 hadolint or Checkov underneath: the point is to build what they do.
 
-> **Status:** Milestones 0-4 of 7. `vulnscan scan` finds a repository's
+> **Status:** Milestones 0-5 of 7. `vulnscan scan` finds a repository's
 > Python, npm and Go dependencies (installed, locked, pinned or declared)
 > and checks them against a local index of OSV's advisories, with version
 > ordering and CVSS scoring written by hand: findings with severity and the
@@ -23,8 +23,11 @@ hadolint or Checkov underneath: the point is to build what they do.
 > chosen severity unless accepted in a reviewed file. It also finds secrets
 > (known token formats, private keys, JWTs, high-entropy values with a
 > secret's name) in the files and in the whole git history, read by hand
-> without running git, and never prints one. Container rules are not built
-> yet (Milestone 5).
+> without running git, and never prints one. And it reads Dockerfiles and
+> Compose files with its own parsers (checked against BuildKit and PyYAML)
+> for risky settings: running as root, unpinned images, unchecked
+> downloads, secrets in the image, privileged containers, the Docker socket,
+> databases open to the network, default passwords.
 
 ## Status
 
@@ -35,7 +38,7 @@ hadolint or Checkov underneath: the point is to build what they do.
 | 2 | Advisory data from OSV in a local index; version ordering for PEP 440, npm SemVer and Go, written by hand; OSV's affected ranges | Built |
 | 3 | Findings: packages matched to advisories, the fixing version, CVSS 3.1 scores; text, JSON and SARIF; `--fail-on`; a baseline file | Built |
 | 4 | Secrets in files and git history, never shown in a finding | Built |
-| 5 | Dockerfile and Compose rules | Not started |
+| 5 | Dockerfile and Compose rules | Built |
 | 6 | Evaluation on my own repositories: every finding labelled by hand; dependency findings cross-checked against osv-scanner | Not started |
 | 7 | README: diagram, decisions, failures, results; explain-it-yourself prompts | Not started |
 
@@ -83,10 +86,12 @@ vulnscan update
 vulnscan scan . --format sarif --output vulnscan.sarif --fail-on high
 ```
 
-`make smoke` builds the image and checks it from outside: it runs
-unprivileged, scans a fixture repository mounted read-only with no
-network, records a link out of the repository without following it, and
-writes nothing into the target.
+`make smoke` builds the image and checks it from outside (24 checks): it
+runs unprivileged, scans fixtures mounted read-only with no network,
+records a link out of the repository without following it, finds a
+vulnerable dependency, three fake secrets (in HEAD, in history, in an
+ignored file) and ten container rules, never prints a secret or a
+password, and writes nothing into the target.
 
 ## What a scan reads
 
@@ -153,8 +158,8 @@ it was found at, and **how sure** the version is:
   applied. The standard library is a dependency too ("stdlib"): pinned by a
   `toolchain` line, otherwise a range from the `go` line.
 - **Not read, and said so:** yarn and pnpm lockfiles, Pipfile.lock,
-  Java (Maven, Gradle), R (renv), Rust; Dockerfiles and Compose files wait
-  for Milestone 5. Anything a reader cannot make sense of is a problem
+  Java (Maven, Gradle), R (renv), Rust. (Dockerfiles and Compose files are
+  not dependency files: the container checks read them.) Anything a reader cannot make sense of is a problem
   with its file and line; a file over 50 MB or not UTF-8 is a problem, not
   a crash.
 
@@ -316,7 +321,7 @@ pinned) against the advisory index:
 
 ### Reports and exit codes
 
-- `--format text` (for people; the default), `json` (schema 3: every
+- `--format text` (for people; the default), `json` (schema 4: every
   finding with its package, file, line, advisories, aliases, severity and
   its source, vector, fix, references, a stable fingerprint, and whether it
   is accepted and failing; and the secrets, see "Secrets") or `sarif`
@@ -454,7 +459,8 @@ says where it is:
 |-------|-------|-----------------|
 | `committed` | in the commit checked out (HEAD), at this path | yes |
 | `history` | in an earlier commit, no longer at this path in HEAD: deleting the file did not remove it from anyone's clone | yes |
-| `file` | in a file outside any git repository (or one whose history could not be read): whether it is committed is not known | yes |
+| `in-git` | in a commit, in a repository whose HEAD cannot be read (see below): whether the latest commit still has it is not known | yes |
+| `file` | in a file outside any git repository (or one whose history or HEAD could not be read): whether it is committed is not known | yes |
 | `uncommitted` | in the working tree only: an ignored `.env`, say, which is where a local secret belongs | no; reported |
 
 Each committed or history finding also gives the first commit that has it,
@@ -464,6 +470,15 @@ revoke it and issue a new one; rewriting history afterwards does not take
 it back. Not pushed: it can still be taken out of the commits before
 pushing. A working-tree file whose content is exactly HEAD's is not read
 twice; an edited one is, and only what HEAD does not have is new.
+
+**Which commit is HEAD** decides committed or not, so it is never guessed.
+When iCloud has moved `.git/HEAD` or its branch's ref off the disk, HEAD is
+read from its reflog (`.git/logs/HEAD`: git adds a line to it whenever HEAD
+changes, so its last line is HEAD now), and the report says so. If the
+reflog is not on the disk either, HEAD is unknown: findings in history are
+`in-git` and in the working tree `file`, both failing. Never `uncommitted`,
+which would pass: that was a bug in this milestone's first version (failure
+14).
 
 ### Reading git without git
 
@@ -596,6 +611,145 @@ explained, and scan time is measured properly in Milestone 6.
   token's shape used as test data). Nothing that is not a credential was
   found.
 
+## Dockerfiles and Compose files
+
+Every scan reads the target's Dockerfiles (`Dockerfile`, `Containerfile`,
+`Dockerfile.*`, `*.Dockerfile`) and Compose files (`compose.yaml`,
+`docker-compose.yml`, `compose.*.yaml`...) with parsers written for this,
+and reports risky settings. A finding says what is wrong in words, never
+with a value that could be a secret ("POSTGRES_PASSWORD is the same as
+POSTGRES_USER", not the password), and how to fix it.
+
+### What is found
+
+| Rule | Severity | When |
+|------|----------|------|
+| `dockerfile/runs-as-root` | medium | an image the file makes ends with `USER root` (or `0`), or has no USER and its base image is not one known to set a non-root user (`:nonroot` tags, Chainguard's images); most base images run as root |
+| `dockerfile/base-image-unpinned` | medium | `FROM` (or `COPY --from`) an image with no tag or `:latest` |
+| `dockerfile/base-image-no-digest` | low | an image pinned by tag only: a tag can be moved to a different image; a digest (`@sha256:...`) cannot |
+| `dockerfile/add-from-url` | medium | `ADD https://...` (or a git repository) without `--checksum` |
+| `dockerfile/pipe-to-shell` | medium | a download run as code unchecked: `curl ... \| sh`, `bash <(curl ...)`, `sh -c "$(wget -O- ...)"`, `eval "$(...)"`, also inside `sh -c '...'`, exec form and heredocs |
+| `dockerfile/secret-in-env` | high | `ENV` with a secret's name (the same name rule as for secrets) and a value: stored in the image, for anyone with it to read (`docker inspect`) |
+| `dockerfile/secret-in-arg` | medium; high with a default | `ARG` with a secret's name: build arguments are kept in the image's history and build provenance |
+| `dockerfile/no-healthcheck` | low | an image that EXPOSEs a port has no HEALTHCHECK (`HEALTHCHECK NONE` counts as a decision) |
+| `compose/privileged` | high | `privileged: true`, or `cap_add` with `ALL` or `SYS_ADMIN` |
+| `compose/host-namespace` | medium | `network_mode`, `pid`, `ipc`, `uts` or `userns_mode` set to `host` |
+| `compose/docker-socket` | high | the Docker socket mounted into a container (read-only too: it is an API, and whoever controls Docker controls the host) |
+| `compose/database-port-published` | medium | a database's port (Postgres, MySQL, MariaDB, MongoDB, Redis, Valkey, Memcached, Elasticsearch and others, by image) published on every interface: `"5432:5432"`, `"5432"`, `0.0.0.0`, or a long form without `host_ip` |
+| `compose/default-password` | medium; high for none | a password variable (or a URL's password) that equals the user or database name, the service's or image's name, or a well-known default; a `${VAR:-default}` is judged by its default. High: settings that allow no password (`POSTGRES_HOST_AUTH_METHOD: trust`, `MYSQL_ALLOW_EMPTY_PASSWORD`) |
+
+- **Which images a Dockerfile makes:** every stage that no later stage
+  builds on (`FROM stage`), copies from (`COPY --from`) or mounts
+  (`RUN --mount=from=`): the last stage, and stages built with
+  `--target`. A build stage that only feeds another is not judged as an
+  image anyone runs. `USER`, `EXPOSE` and `HEALTHCHECK` are inherited from
+  the stages a stage builds on.
+- **Build arguments** before the first `FROM` are filled in where they
+  have defaults (`FROM python:${V}-slim`); an image chosen by an argument
+  with no default is not judged.
+- **One password written once** (in a YAML anchor) and used by several
+  services is one finding, naming them all.
+- **Accepting a rule,** everywhere or in one file, in `.vulnscan.toml`:
+  `rule = "dockerfile/no-healthcheck"`, optional `path = "bench/Dockerfile"`,
+  with a reason and an expiry date. An unknown rule stops the scan.
+- **Not covered:** `ONBUILD` instructions (they run in other images),
+  a `SHELL` that changes the shell, Compose's `extends`, `include` and
+  `env_file`, variables from `.env` files, a download stored in a variable
+  and run later (`x=$(curl ...); echo $x | sh`), a download saved to a file
+  and run without a check (only the pipe forms are found), and anything
+  across files: a healthcheck in Compose does not silence the Dockerfile's
+  finding.
+
+### Reading the files
+
+- **Dockerfiles as BuildKit reads them** (`containers/dockerfile.py`):
+  parser directives (`# escape=` changes the continuation character), a
+  first line's leading whitespace removed, continuation lines appended as
+  they are, comment lines and empty lines inside a continued instruction
+  skipped, a `#` after an instruction kept as part of it, flags, JSON
+  (exec) form only when the whole rest is a JSON array of strings, heredocs
+  (`<<EOF`, `<<-EOF`, quoted names, several on one line, CR kept in their
+  bodies as BuildKit keeps it).
+- **The part of YAML Compose files use** (`containers/yamlsub.py`): block
+  and flow collections, three kinds of scalar, block scalars with every
+  chomping, comments, anchors, aliases and merge keys. Every scalar is kept
+  as written, as text. Refused with the line, never guessed at: tags (Compose's
+  `!reset`), several documents, `?` keys, quoted strings over several
+  lines, explicit block indentation, duplicate keys, tabs. VulnScan still
+  has no runtime dependencies.
+- **A file that is not on this disk** (an iCloud placeholder) is read from
+  git's HEAD instead, and its findings say so; if HEAD's copy is not on
+  the disk either, it is named as not read, with the reason.
+
+### How it is tested
+
+- **The Dockerfile parser against BuildKit itself.** `scripts/buildkit_parse`
+  is a small Go program that prints BuildKit's own parse
+  (github.com/moby/buildkit v0.34.0); `scripts/check_dockerfile_parser.py`
+  compares the two on real and generated Dockerfiles (continuations with
+  comments and blank lines inside, spaces after the escape, heredocs, JSON
+  arrays that are and are not exec form, the backtick escape, CRLF). On
+  3,016 Dockerfiles (16 of mine, 3,000 generated) every one BuildKit
+  accepts, 2,687, is parsed the same: instructions, first and last lines,
+  text, flags, form, heredocs. The other 329 are generated files BuildKit
+  rejects as unbuildable (LABEL without `key=value`, say), which VulnScan
+  reads anyway. BuildKit's answers for 18 hard cases are recorded in
+  `tests/data/buildkit`, so the tests check against BuildKit without Go;
+  where the tool is built, 200 generated files are also compared live.
+- **The YAML reader against PyYAML** (used only by the tests, every scalar
+  read as a string, merge keys applied): documents PyYAML writes in block,
+  flow, literal and folded styles, with shared objects as anchors and
+  aliases (Hypothesis; documents without line breaks in their strings must
+  never be refused); keys made of YAML's own characters; hand-written
+  merges, block scalars and comments; three of my Compose files copied
+  into `tests/data/compose`. Outside the tests: all 94 YAML files in my
+  portfolio (Compose files, CI workflows, ROS 2 parameters, PyTorch's own
+  YAML) are read exactly as PyYAML reads them (75) or refused (19:
+  several documents, or a quoted string over several lines), none misread;
+  and 30,000 generated documents with keys of any characters: 7,137 read,
+  all exactly, the rest refused.
+- **Every rule fires and does not fire** (`tests/test_containers.py`, 82
+  tests): each form of each rule, the cases next to it that must stay
+  quiet (`127.0.0.1:5432:5432`, `[::1]`, a digest, `HEALTHCHECK NONE`, a
+  password from `${PG_PASS}`, `POSTGRES_PASSWORD_FILE`...), and no password
+  or secret value in any message, text, JSON or SARIF (the SARIF validated
+  against the OASIS schema).
+- **38 planted bugs** each fail the tests (the YAML merge order, chomping,
+  folding, comments, sequences at a key's indentation, escapes, `?` keys,
+  a nameless alias, a key split at the wrong ": "; BuildKit's comment, blank-line, escape, CR and
+  directive rules; pipelines, `sh -c`, substitutions; each rule's own
+  conditions; the baseline's path and unknown rules; and HEAD's
+  reflog). Two passed at first. One test checked only an exit code that
+  other findings kept at 1, and now checks the finding. One plant was in
+  code that, after another fix, changed nothing; that code was removed.
+- **The image** (`make smoke`, 24 checks): a risky Dockerfile and Compose
+  file, mounted read-only with no network: ten rules found, no password
+  printed.
+
+### On my portfolio (2026-10-09)
+
+33 files: 23 Dockerfiles and 10 Compose files. 27 were read. The 6 others
+are iCloud placeholders whose committed copies are placeholders too, so
+neither copy is on this disk (each named, with the missing object). **49
+findings in 20 files, each labelled by hand:**
+
+| Rule | Findings | Labelled |
+|------|----------|----------|
+| `base-image-no-digest` | 26 | all true: no image in the portfolio is pinned by digest |
+| `runs-as-root` | 9 | all true: python-slim, ROS, CUDA and nginx images with no USER (all of those run as root) |
+| `default-password` | 6 | all true: LinkForge, PaperTrail and SurgiServe use the user name as the database password (local development defaults, said so in SurgiServe's file) |
+| `no-healthcheck` | 5 | 4 true; 1 false in context: LinkForge's API has a healthcheck in its Compose file, which this rule cannot see |
+| `database-port-published` | 3 | all true: LinkForge's Postgres and Redis and PaperTrail's Postgres listen on every interface, two of them with the user name as the password |
+
+48 of 49 say something true. What matters most: in LinkForge and
+PaperTrail, `docker compose up` puts a Postgres whose password is its user
+name on every network interface of the machine, so anyone on the same
+network could log in while it runs. SurgiServe and Gatekeeper already bind
+theirs to 127.0.0.1. Nothing has been changed in those repositories:
+Milestone 6 decides fixes with me. A first test with these files ran into
+a placeholder Dockerfile, and that led to a bug in Milestone 4's secret
+scan (failure 14).
+
 ## Development
 
 ```bash
@@ -633,6 +787,11 @@ install does not work outside pytest.
 | `src/vulnscan/secrets/rules.py` | What a secret looks like: formats, private keys, JWTs, high-entropy assignments; redaction; the fingerprint |
 | `src/vulnscan/secrets/__init__.py` | The secret scan: history and working tree, states, pushed, acceptances |
 | `scripts/show_context.py` | The lines around each secret finding, with values masked, for labelling by hand |
+| `src/vulnscan/containers/__init__.py` | The Dockerfile and Compose rules; reading a file, or its committed copy; acceptances by rule |
+| `src/vulnscan/containers/dockerfile.py` | Dockerfiles, read as BuildKit reads them; words and ENV/ARG pairs |
+| `src/vulnscan/containers/yamlsub.py` | The part of YAML Compose files use |
+| `src/vulnscan/containers/shell.py` | A RUN line's commands, pipelines and substitutions; downloads run as code |
+| `scripts/buildkit_parse/`, `scripts/check_dockerfile_parser.py` | BuildKit's own parse (a Go development tool), and the comparison with it |
 | `tests/helpers.py` | Repositories made with git; fake secrets built at run time |
 | `scripts/check_cvss.py` | The computed ratings against GitHub's |
 | `tests/data/` | Six real advisories and the OASIS SARIF schema, with where they came from |
@@ -708,3 +867,40 @@ install does not work outside pytest.
     by a letter not to match, when the longer run is itself a token of that
     shape. Both corrected; what is tested now is that a match never stops
     inside a longer run.
+14. **Milestone 4 could have passed a committed secret.** Reading
+    Dockerfiles that are iCloud placeholders from git's HEAD reported
+    "not committed" for files that are on GitHub: iCloud had moved
+    `refs/heads/main` off the disk, so HEAD resolved to nothing, which the
+    code took as "no commits". The secret scan made the same mistake. Every
+    secret in such a repository's working tree would have been
+    `uncommitted`, which never fails. None was found there, so no output
+    was wrong, but only by luck. HEAD unknown is now its own case (`in-git`,
+    `file`), and HEAD is read from its reflog when that is on the disk (all
+    31 repositories, on 2026-10-09; used for 16).
+15. **The first reference was not a reference.** The `dockerfile-parse`
+    library ends an instruction at an empty line inside a continuation;
+    BuildKit skips the line and continues. So the check is against
+    BuildKit's own parser instead, through a small Go program.
+16. **BuildKit disagreed with my parser four times**: an instruction's
+    trailing whitespace (BuildKit keeps it), JSON form for COPY, ADD and
+    VOLUME, a JSON array after `HEALTHCHECK NONE`, and a CR in heredoc
+    bodies (found by the live comparison, after the recorded cases all
+    passed). All fixed; 0 differences on 3,016 files since.
+17. **The YAML reader got five things wrong.** A document that is one flow
+    mapping was read as a `key: value` line, because brackets inside a
+    quoted string were counted; a stricter property test (strings without
+    line breaks must never be refused) found it. Then keys made of YAML's
+    own characters, which the first generators never produced, showed `? `
+    keys inside `{ }` read as text (72 of 3,000 documents misread) and a
+    bare `*` crashing the reader. And the strict test, run again, found
+    `-?` refused as a value: `rest in "-?:"` meant "one of these three
+    characters" but tests for a substring. Another run found `0]: {...}`
+    split inside the braces: the key splitter counted brackets, but a plain
+    key may hold them; the first ": " ends it. All five read right or
+    refused now, and each has a test.
+18. **One password counted three times.** SurgiServe's database URL is one
+    YAML anchor used by three services, and was three findings; it is one
+    now, naming the services.
+19. **Two planted bugs passed at first** (see "How it is tested" under
+    Dockerfiles and Compose files): a weak test, strengthened, and code
+    that a later fix had made redundant, removed.

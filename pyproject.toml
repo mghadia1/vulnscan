@@ -16,11 +16,14 @@ dependencies = []
 dev = [
   "hypothesis>=6.140",
   # References for hand-written code, used only by tests: version ordering,
-  # CVSS scores, and the SARIF schema check.
+  # CVSS scores, the SARIF schema check, YAML and Dockerfile parsing.
   "packaging>=26.3",
   "semver>=3.1",
   "cvss>=3.6",
   "jsonschema>=4.26",
+  "pyyaml>=6.0.3",
+  "types-pyyaml>=6.0.12",
+  "dockerfile-parse>=2.0.1",
   "mypy>=2.4",
   "pytest>=9.1",
   "ruff>=0.16",
@@ -53,8 +56,10 @@ known-local-folder = ["helpers"]
 [tool.mypy]
 strict = true
 files = ["src", "tests"]
+# tests/test_dockerfile.py imports scripts/check_dockerfile_parser.py.
+mypy_path = "scripts"
 
 # The test-only references ship without type information.
 [[tool.mypy.overrides]]
-module = ["cvss", "cvss.*", "jsonschema"]
+module = ["cvss", "cvss.*", "jsonschema", "dockerfile_parse"]
 ignore_missing_imports = true

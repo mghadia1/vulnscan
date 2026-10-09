@@ -328,3 +328,64 @@ def test_files_not_on_this_disk_are_not_read(
     assert ("app/.env", "uncommitted") not in paths  # not read
     assert ("app/config.py", "committed") in paths  # from git
     assert ("app/config.py", "uncommitted") not in paths
+
+
+def test_head_not_on_this_disk_is_never_uncommitted(
+    scenario: tuple[Path, Planted, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When iCloud has moved HEAD's branch ref off the disk, which commit is
+    checked out is not known. Secrets in history are then "in-git", and in
+    the working tree "file": both fail. (The first version called every
+    file in such a repository uncommitted, which never fails.)"""
+    target, _, _ = scenario
+    real_lstat: Callable[..., os.stat_result] = os.lstat
+    root = str(target.resolve())
+    # HEAD's branch, and HEAD's own reflog, both moved to iCloud.
+    offline = {"app/.git/refs/heads/main", "app/.git/logs/HEAD"}
+
+    def lstat(path: str | Path) -> object:
+        st = real_lstat(path)
+        if os.path.relpath(str(path), root) in offline:
+            return types.SimpleNamespace(
+                st_mode=st.st_mode, st_size=st.st_size, st_flags=0x40000000
+            )
+        return st
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    scan = _scan(target)
+    states = {(f.path, f.rule): f.state for f in scan.findings}
+    assert states[("app/config.py", "github-token")] == "in-git"
+    assert states[("app/old.env", "stripe-secret-key")] == "in-git"
+    assert states[("app/.env", "aws-access-key-id")] == "file"
+    assert "uncommitted" not in states.values()
+    [repo] = scan.repositories
+    assert any("HEAD's branch is not on this disk" in n for n in repo.notes)
+
+
+def test_head_from_its_reflog(
+    scenario: tuple[Path, Planted, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HEAD itself and its branch moved to iCloud, its reflog still on
+    disk: HEAD is read from the reflog, and every state is what it is when
+    nothing is missing."""
+    target, _, _ = scenario
+    expected = {(f.path, f.rule): f.state for f in _scan(target).findings}
+    real_lstat: Callable[..., os.stat_result] = os.lstat
+    root = str(target.resolve())
+    offline = {"app/.git/HEAD", "app/.git/refs/heads/main"}
+
+    def lstat(path: str | Path) -> object:
+        st = real_lstat(path)
+        if os.path.relpath(str(path), root) in offline:
+            return types.SimpleNamespace(
+                st_mode=st.st_mode, st_size=st.st_size, st_flags=0x40000000
+            )
+        return st
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    scan = _scan(target)
+    assert {(f.path, f.rule): f.state for f in scan.findings} == expected
+    [repo] = scan.repositories
+    assert "HEAD read from its reflog: its ref is not on this disk" in repo.notes

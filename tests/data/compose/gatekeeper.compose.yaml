@@ -1,0 +1,82 @@
+# Two gateway replicas (8080 and 8081) sharing one rate limit through Redis,
+# in front of test backends (all the echo service): "users" with two
+# instances, and "orders". Prometheus scrapes the replicas' admin ports
+# (9091 inside the network; 9091 and 9092 on localhost).
+x-echo: &echo
+  build:
+    context: .
+    target: echo
+  restart: unless-stopped
+
+x-gatekeeper: &gatekeeper
+  build:
+    context: .
+    target: gatekeeper
+    args:
+      VERSION: ${VERSION:-dev}
+  environment:
+    GATEKEEPER_CONFIG: /etc/gatekeeper/config.json
+  volumes:
+    - ./config/gatekeeper.json:/etc/gatekeeper/config.json:ro
+  depends_on:
+    users-1:
+      condition: service_healthy
+    users-2:
+      condition: service_healthy
+    orders:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  gatekeeper:
+    <<: *gatekeeper
+    ports:
+      - "8080:8080"
+      # The admin port (metrics), on localhost only.
+      - "127.0.0.1:9091:9091"
+
+  # A second replica with the same config, to show the rate limit is shared.
+  gatekeeper-2:
+    <<: *gatekeeper
+    ports:
+      - "8081:8080"
+      - "127.0.0.1:9092:9091"
+
+  prometheus:
+    image: prom/prometheus:v3.7.0
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    depends_on:
+      - gatekeeper
+      - gatekeeper-2
+
+  redis:
+    image: redis:8-alpine
+    # Published only on localhost, for the integration test (make test-redis).
+    ports:
+      - "127.0.0.1:6390:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  users-1:
+    <<: *echo
+    environment:
+      ECHO_NAME: users-1
+
+  users-2:
+    <<: *echo
+    environment:
+      ECHO_NAME: users-2
+
+  orders:
+    <<: *echo
+    environment:
+      ECHO_NAME: orders

@@ -2,7 +2,8 @@
 code scanning, text for people.
 
 The JSON has a schema number; a change to its meaning raises it (2: the
-findings, with their advisories, severity, fix and acceptance; 3: secrets).
+findings, with their advisories, severity, fix and acceptance; 3: secrets;
+4: container findings).
 
 No output contains a secret: a secret finding carries its rule, place,
 redacted form (a fixed prefix at most, and the length) and fingerprint.
@@ -17,13 +18,14 @@ from vulnscan import __version__
 from vulnscan.advisories import Snapshot
 from vulnscan.baseline import Applied
 from vulnscan.classify import Kind, classify
+from vulnscan.containers import AppliedConfig, ConfigFinding, ContainerScan
 from vulnscan.findings import SEVERITIES, Finding, Matching, severity_rank
 from vulnscan.inventory import Inventory, build
 from vulnscan.sarif import to_sarif
 from vulnscan.secrets import AppliedSecrets, SecretFinding, SecretScan, commit_date
 from vulnscan.walk import Tree
 
-SCHEMA = 3
+SCHEMA = 4
 THRESHOLDS = ("low", "medium", "high", "critical", "never")
 
 
@@ -48,6 +50,15 @@ class SecretsChecked:
 
 
 @dataclass(frozen=True)
+class ContainersChecked:
+    """What the Dockerfile and Compose checks did."""
+
+    scan: ContainerScan
+    applied: AppliedConfig
+    baseline: str | None
+
+
+@dataclass(frozen=True)
 class Report:
     target: str
     tree: Tree
@@ -56,6 +67,7 @@ class Report:
     checked: Checked | None = None  # None: --no-advisories
     threshold: str = "low"
     secrets: SecretsChecked | None = None  # None: --no-secrets
+    containers: ContainersChecked | None = None  # None: --no-containers
 
     @classmethod
     def from_tree(cls, target: str, tree: Tree) -> Report:
@@ -94,9 +106,22 @@ class Report:
         )
 
     @property
+    def config_findings(self) -> tuple[ConfigFinding, ...]:
+        return self.containers.applied.findings if self.containers else ()
+
+    def failing_config(self, finding: ConfigFinding) -> bool:
+        return (
+            self.threshold != "never"
+            and finding.accepted is None
+            and severity_rank(finding.severity) >= severity_rank(self.threshold)
+        )
+
+    @property
     def failed(self) -> bool:
-        return any(self.failing(f) for f in self.findings) or any(
-            self.failing_secret(f) for f in self.secret_findings
+        return (
+            any(self.failing(f) for f in self.findings)
+            or any(self.failing_secret(f) for f in self.secret_findings)
+            or any(self.failing_config(f) for f in self.config_findings)
         )
 
     @property
@@ -175,6 +200,68 @@ class Report:
             "secrets_by_state": dict(
                 Counter(f.state for f in self.secret_findings).most_common()
             ),
+            "container_files": (
+                len(self.containers.scan.files) if self.containers else 0
+            ),
+            "container_findings": len(self.config_findings),
+            "container_failing": sum(
+                self.failing_config(f) for f in self.config_findings
+            ),
+        }
+
+    def _config(self, f: ConfigFinding) -> dict[str, Any]:
+        return {
+            "rule": f.rule,
+            "title": f.title,
+            "severity": f.severity,
+            "path": f.path,
+            "line": f.line,
+            "subject": f.subject,
+            "message": f.message,
+            "fix": f.fix,
+            "fingerprint": f.fingerprint,
+            "read_from": f.source,
+            "accepted": (
+                {"reason": f.accepted.reason, "expires": f.accepted.expires.isoformat()}
+                if f.accepted
+                else None
+            ),
+            "failing": self.failing_config(f),
+        }
+
+    def _containers_json(self) -> dict[str, Any]:
+        c = self.containers
+        if c is None:
+            return {"checked": False}
+        return {
+            "checked": True,
+            "files": [
+                {
+                    "path": f.path,
+                    "kind": f.kind,
+                    "read_from": f.source,
+                    "error": f.error,
+                }
+                for f in c.scan.files
+            ],
+            "findings": [self._config(f) for f in c.applied.findings],
+            "baseline": {
+                "file": c.baseline,
+                "expired": [
+                    {
+                        "rule": a.rule,
+                        "path": a.path,
+                        "expires": a.expires.isoformat(),
+                        "reason": a.reason,
+                        "finding": f.fingerprint,
+                    }
+                    for a, f in c.applied.expired
+                ],
+                "unused": [
+                    {"rule": a.rule, "path": a.path, "expires": a.expires.isoformat()}
+                    for a in c.applied.unused
+                ],
+            },
         }
 
     def _secret(self, f: SecretFinding) -> dict[str, Any]:
@@ -299,6 +386,7 @@ class Report:
             ),
             "findings": [self._finding(f) for f in self.findings],
             "secrets": self._secrets_json(),
+            "containers": self._containers_json(),
             "baseline": (
                 {
                     "file": c.baseline,
@@ -328,9 +416,8 @@ class Report:
         return json.dumps(document, indent=2) + "\n"
 
     def to_sarif(self) -> str:
-        return (
-            json.dumps(to_sarif(self.findings, self.secret_findings), indent=2) + "\n"
-        )
+        sarif = to_sarif(self.findings, self.secret_findings, self.config_findings)
+        return json.dumps(sarif, indent=2) + "\n"
 
     def to_text(self) -> str:
         t = self.tree
@@ -374,7 +461,58 @@ class Report:
             ]
         lines += self._text_findings()
         lines += self._text_secrets()
+        lines += self._text_containers()
         return "\n".join(lines) + "\n"
+
+    def _text_containers(self) -> list[str]:
+        c = self.containers
+        if c is None:
+            return ["Dockerfiles and Compose files not checked (--no-containers)"]
+        files = c.scan.files
+        read = [f for f in files if f.source is not None]
+        from_git = sum(f.source == "HEAD" for f in read)
+        dockerfiles = sum(f.kind == "dockerfile" for f in read)
+        lines = [
+            f"containers: {dockerfiles} Dockerfiles and {len(read) - dockerfiles} "
+            "Compose files read"
+            + (f" ({from_git} from git's HEAD: not on this disk)" if from_git else "")
+        ]
+        lines += [f"  NOT READ: {f.path}: {f.error}" for f in files if f.source is None]
+        live = [f for f in c.applied.findings if f.accepted is None]
+        accepted = [f for f in c.applied.findings if f.accepted is not None]
+        failing = sum(self.failing_config(f) for f in c.applied.findings)
+        lines.append(f"{len(live)} container findings, {failing} failing")
+        for f in live:
+            lines += self._config_lines(f)
+        if accepted:
+            lines.append(f"{len(accepted)} accepted (not failing):")
+            for f in accepted:
+                assert f.accepted is not None
+                lines += self._config_lines(f)
+                lines.append(
+                    f"           accepted until {f.accepted.expires}: "
+                    f"{f.accepted.reason}"
+                )
+        for acceptance, finding in c.applied.expired:
+            lines.append(
+                f"  acceptance of {acceptance.rule} expired {acceptance.expires} "
+                f"({finding.path}): failing again"
+            )
+        for acceptance in c.applied.unused:
+            where = f" in {acceptance.path}" if acceptance.path else ""
+            lines.append(
+                f"  acceptance of {acceptance.rule}{where} matches no finding "
+                f"({c.baseline}): remove it?"
+            )
+        return lines
+
+    def _config_lines(self, f: ConfigFinding) -> list[str]:
+        source = " (read from HEAD)" if f.source == "HEAD" else ""
+        return [
+            f"  {f.severity.upper():<8} {f.rule}  {f.path}:{f.line}{source}",
+            f"           {f.message}",
+            f"           fix: {f.fix}",
+        ]
 
     def _text_secrets(self) -> list[str]:
         s = self.secrets
@@ -448,6 +586,7 @@ class Report:
         where = {
             "committed": "in HEAD",
             "history": "in history only",
+            "in-git": "in a commit (HEAD unknown)",
             "file": "in a file",
             "uncommitted": "not committed",
         }[f.state]

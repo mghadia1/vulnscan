@@ -15,7 +15,7 @@ import re
 import sys
 from pathlib import Path
 
-from vulnscan.git import Repository, parse_commit, parse_tree
+from vulnscan.git import Repository, file_at
 from vulnscan.secrets.rules import find
 
 _RUN = re.compile(r"[A-Za-z0-9+/=_.~-]{12,}")
@@ -33,14 +33,7 @@ def _masked(line: str, spans: list[tuple[int, int]]) -> str:
 def _blob_at(git_dir: Path, commit: str, path: str) -> bytes | None:
     repo = Repository.open(git_dir)
     try:
-        _, data = repo.read(commit)
-        tree = parse_commit(commit, data).tree
-        for part in path.split("/"):
-            entries = {name: sha for _, name, sha in parse_tree(repo.read(tree)[1])}
-            if part not in entries:
-                return None
-            tree = entries[part]
-        return repo.read(tree)[1]
+        return file_at(repo, commit, path)
     finally:
         repo.close()
 

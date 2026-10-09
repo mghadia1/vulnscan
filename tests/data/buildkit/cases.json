@@ -1,0 +1,334 @@
+{
+ "continuation": [
+  "FROM a\nRUN one \\\n    two \\\n    three\n",
+  [
+   [
+    "FROM",
+    1,
+    1,
+    "FROM a",
+    [],
+    null,
+    []
+   ],
+   [
+    "RUN",
+    2,
+    4,
+    "RUN one     two     three",
+    [],
+    null,
+    []
+   ]
+  ]
+ ],
+ "comment and blank inside": [
+  "RUN apt-get update \\\n    # a comment\n\n    && apt-get install -y curl\n",
+  [
+   [
+    "RUN",
+    1,
+    4,
+    "RUN apt-get update     && apt-get install -y curl",
+    [],
+    null,
+    []
+   ]
+  ]
+ ],
+ "spaces after the escape": [
+  "RUN a \\   \n  b \\\t\n  c\n",
+  [
+   [
+    "RUN",
+    1,
+    3,
+    "RUN a   b   c",
+    [],
+    null,
+    []
+   ]
+  ]
+ ],
+ "comment after an instruction": [
+  "RUN echo hi # not a comment\n",
+  [
+   [
+    "RUN",
+    1,
+    1,
+    "RUN echo hi # not a comment",
+    [],
+    null,
+    []
+   ]
+  ]
+ ],
+ "backtick escape": [
+  "# escape=`\nFROM a\nRUN dir `\n  c:\\\\x\n",
+  [
+   [
+    "FROM",
+    2,
+    2,
+    "FROM a",
+    [],
+    null,
+    []
+   ],
+   [
+    "RUN",
+    3,
+    4,
+    "RUN dir   c:\\\\x",
+    [],
+    null,
+    []
+   ]
+  ]
+ ],
+ "heredoc": [
+  "RUN <<EOF\necho one\necho two\nEOF\nRUN true\n",
+  [
+   [
+    "RUN",
+    1,
+    4,
+    "RUN <<EOF",
+    [],
+    null,
+    [
+     [
+      "EOF",
+      "echo one\necho two\n"
+     ]
+    ]
+   ],
+   [
+    "RUN",
+    5,
+    5,
+    "RUN true",
+    [],
+    null,
+    []
+   ]
+  ]
+ ],
+ "heredoc with dash and quotes": [
+  "RUN <<-'END' cat > /x\n\tone\n\tEND\n",
+  [
+   [
+    "RUN",
+    1,
+    3,
+    "RUN <<-'END' cat > /x",
+    [],
+    null,
+    [
+     [
+      "END",
+      "\tone\n"
+     ]
+    ]
+   ]
+  ]
+ ],
+ "two heredocs": [
+  "RUN <<A <<B\na\nA\nb\nB\n",
+  [
+   [
+    "RUN",
+    1,
+    5,
+    "RUN <<A <<B",
+    [],
+    null,
+    [
+     [
+      "A",
+      "a\n"
+     ],
+     [
+      "B",
+      "b\n"
+     ]
+    ]
+   ]
+  ]
+ ],
+ "exec form": [
+  "CMD [\"python\", \"-m\", \"x\"]\n",
+  [
+   [
+    "CMD",
+    1,
+    1,
+    "CMD [\"python\", \"-m\", \"x\"]",
+    [],
+    [
+     "python",
+     "-m",
+     "x"
+    ],
+    []
+   ]
+  ]
+ ],
+ "not exec form: trailing text": [
+  "RUN [\"a\", \"b\"] c\n",
+  [
+   [
+    "RUN",
+    1,
+    1,
+    "RUN [\"a\", \"b\"] c",
+    [],
+    null,
+    []
+   ]
+  ]
+ ],
+ "not exec form: bad JSON": [
+  "RUN [\"a\", b]\n",
+  [
+   [
+    "RUN",
+    1,
+    1,
+    "RUN [\"a\", b]",
+    [],
+    null,
+    []
+   ]
+  ]
+ ],
+ "healthcheck exec form": [
+  "HEALTHCHECK --interval=5s CMD [\"/x\", \"y\"]\n",
+  [
+   [
+    "HEALTHCHECK",
+    1,
+    1,
+    "HEALTHCHECK --interval=5s CMD [\"/x\", \"y\"]",
+    [
+     "--interval=5s"
+    ],
+    [
+     "CMD",
+     "/x",
+     "y"
+    ],
+    []
+   ]
+  ]
+ ],
+ "flags": [
+  "COPY --from=build --chown=1:1 /a /b\n",
+  [
+   [
+    "COPY",
+    1,
+    1,
+    "COPY --from=build --chown=1:1 /a /b",
+    [
+     "--from=build",
+     "--chown=1:1"
+    ],
+    null,
+    []
+   ]
+  ]
+ ],
+ "lower case": [
+  "from a as b\nrun x\n",
+  [
+   [
+    "FROM",
+    1,
+    1,
+    "from a as b",
+    [],
+    null,
+    []
+   ],
+   [
+    "RUN",
+    2,
+    2,
+    "run x",
+    [],
+    null,
+    []
+   ]
+  ]
+ ],
+ "CRLF": [
+  "FROM a\r\nRUN b \\\r\n  c\r\n",
+  [
+   [
+    "FROM",
+    1,
+    1,
+    "FROM a",
+    [],
+    null,
+    []
+   ],
+   [
+    "RUN",
+    2,
+    3,
+    "RUN b   c",
+    [],
+    null,
+    []
+   ]
+  ]
+ ],
+ "volume in JSON": [
+  "VOLUME [\"/data\", \"/logs\"]\n",
+  [
+   [
+    "VOLUME",
+    1,
+    1,
+    "VOLUME [\"/data\", \"/logs\"]",
+    [],
+    [
+     "/data",
+     "/logs"
+    ],
+    []
+   ]
+  ]
+ ],
+ "indented instruction": [
+  "   RUN x\n",
+  [
+   [
+    "RUN",
+    1,
+    1,
+    "RUN x",
+    [],
+    null,
+    []
+   ]
+  ]
+ ],
+ "last line continues": [
+  "RUN a \\\n",
+  [
+   [
+    "RUN",
+    1,
+    1,
+    "RUN a ",
+    [],
+    null,
+    []
+   ]
+  ]
+ ]
+}

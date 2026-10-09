@@ -5,7 +5,7 @@ IMAGE := vulnscan:local
 # What `make scan` scans.
 TARGET ?= .
 
-.PHONY: install lint format typecheck test check scan update lookup image smoke
+.PHONY: install lint format typecheck test check scan update lookup image smoke check-buildkit
 
 $(BIN)/python:
 	$(PYTHON) -m venv $(VENV)
@@ -52,3 +52,9 @@ image:
 # The image against a fixture: mounted read-only, with no network.
 smoke: image
 	./scripts/smoke.sh $(IMAGE)
+
+# The Dockerfile parser against BuildKit's own, on the Dockerfiles under
+# TARGET and 3,000 generated ones (needs Go once, to build
+# scripts/buildkit_parse into ~/.cache/vulnscan-dev).
+check-buildkit:
+	PYTHONPATH=src $(BIN)/python scripts/check_dockerfile_parser.py --generated 3000 $(TARGET)

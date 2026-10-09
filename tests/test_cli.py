@@ -18,7 +18,10 @@ def repo(tmp_path: Path) -> Path:
     (root / "web").mkdir(parents=True)
     (root / "pyproject.toml").write_text('[project]\nname = "x"\n')
     (root / "web/package-lock.json").write_text("{}")
-    (root / "Dockerfile").write_text("FROM python:3.14-slim\n")
+    # Pinned and unprivileged: no container findings here.
+    (root / "Dockerfile").write_text(
+        "FROM python:3.14-slim@sha256:" + "a" * 64 + "\nUSER 10001\n"
+    )
     (root / "README.md").write_text("# x\n")
     (root / ".venv").mkdir()
     (root / ".venv/pyvenv.cfg").write_text("home = /usr/bin\n")
@@ -31,7 +34,7 @@ def test_json_report(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     )
     report = json.loads(capsys.readouterr().out)
     assert report["tool"] == {"name": "vulnscan", "version": __version__}
-    assert report["schema"] == 3
+    assert report["schema"] == 4
     assert report["summary"] == {
         "files": 4,
         "recognized": 3,
@@ -48,6 +51,9 @@ def test_json_report(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
         "secrets": 0,
         "secrets_failing": 0,
         "secrets_by_state": {},
+        "container_files": 1,
+        "container_findings": 0,
+        "container_failing": 0,
     }
     assert report["advisories"] == {"checked": False}
     assert report["files"] == [
@@ -63,7 +69,6 @@ def test_text_report(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["scan", str(repo), "--no-advisories"]) == EXIT_CLEAN
     out = capsys.readouterr().out
     assert "4 files, 3 of them manifests" in out
-    assert "Dockerfile: container rules come in Milestone 5" in out
     # The fixture's lockfile is empty: a problem, named, not a crash.
     assert 'web/package-lock.json: no "packages" object' in out
     assert "advisories not checked (--no-advisories)" in out

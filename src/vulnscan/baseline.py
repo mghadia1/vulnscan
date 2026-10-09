@@ -13,6 +13,12 @@ finding is a reviewed change like any other.
     reason = "a fake key the tests are built around"
     expires = 2027-03-31
 
+    [[accept]]
+    rule = "dockerfile/no-healthcheck"  # a container rule
+    path = "bench/Dockerfile"            # optional: only in this file
+    reason = "a load generator, not a service"
+    expires = 2027-03-31
+
 Every acceptance needs a reason and an expiry date: an acceptance is a
 decision to revisit, not a way to make a finding disappear. An accepted
 finding is still reported (as accepted), and does not fail the scan; once
@@ -29,8 +35,15 @@ from pathlib import Path
 
 from vulnscan.findings import Acceptance, Finding
 
+
+def known_rules() -> frozenset[str]:
+    from vulnscan.containers import RULES  # (import here: no cycle)
+
+    return frozenset(RULES)
+
+
 FILE_NAME = ".vulnscan.toml"
-_KEYS = {"advisory", "package", "reason", "expires", "secret"}
+_KEYS = {"advisory", "package", "reason", "expires", "secret", "rule", "path"}
 _FINGERPRINT = re.compile(r"[0-9a-f]{16}")
 
 
@@ -65,11 +78,19 @@ def load(path: Path) -> list[Acceptance]:
             entry.get("expires"),
         )
         package, secret = entry.get("package"), entry.get("secret")
-        if (advisory is None) == (secret is None):
+        rule, path_ = entry.get("rule"), entry.get("path")
+        if sum(x is not None for x in (advisory, secret, rule)) != 1:
             raise BaselineError(
-                f'{where}: needs advisory = "<id or alias>" or secret = '
-                '"<fingerprint>" (one of them)'
+                f'{where}: needs one of advisory = "<id or alias>", secret = '
+                '"<fingerprint>" or rule = "<rule>"'
             )
+        if path_ is not None and (rule is None or not isinstance(path_, str)):
+            raise BaselineError(f"{where}: path is for rules (a file's path)")
+        if rule is not None:
+            if not isinstance(rule, str) or rule not in known_rules():
+                raise BaselineError(f"{where}: no such rule {rule!r}")
+            if package is not None:
+                raise BaselineError(f"{where}: package is for advisories")
         if secret is not None:
             if not isinstance(secret, str) or not _FINGERPRINT.fullmatch(secret):
                 raise BaselineError(
@@ -78,7 +99,7 @@ def load(path: Path) -> list[Acceptance]:
                 )
             if package is not None:
                 raise BaselineError(f"{where}: package is for advisories")
-        elif not isinstance(advisory, str) or not advisory.strip():
+        elif rule is None and (not isinstance(advisory, str) or not advisory.strip()):
             raise BaselineError(f'{where}: needs advisory = "<id or alias>"')
         if not isinstance(reason, str) or not reason.strip():
             raise BaselineError(f"{where}: needs a reason")
@@ -94,6 +115,8 @@ def load(path: Path) -> list[Acceptance]:
                 reason.strip(),
                 expires,
                 secret,
+                rule,
+                path_,
             )
         )
     return accepted

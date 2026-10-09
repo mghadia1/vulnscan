@@ -9,7 +9,8 @@
 # target that is not there. Then secrets: a git repository (made on the
 # host, owned by another user than the container's, with no git in the
 # image) whose fake secrets are found in HEAD, in history and in an
-# ignored file, and never printed in any format.
+# ignored file, and never printed in any format. Then a Dockerfile and a
+# Compose file with risky settings: each rule found, no password printed.
 set -euo pipefail
 image="${1:-vulnscan:local}"
 
@@ -33,7 +34,8 @@ cat > "$fixture/repo/web/package-lock.json" <<'JSON'
 }
 JSON
 printf 'Django==5.1.2\nrequests>=2.31\n' > "$fixture/repo/requirements.txt"
-printf 'FROM python:3.14-slim\n' > "$fixture/repo/Dockerfile"
+# Pinned and unprivileged: the container rules have nothing to say here.
+printf 'FROM python:3.14-slim@sha256:%s\nUSER 10001\n' "$(printf 'a%.0s' $(seq 64))" > "$fixture/repo/Dockerfile"
 printf 'module example.com/x\n' > "$fixture/outside/go.mod"
 ln -s ../outside "$fixture/repo/linked"
 listing() { (cd "$fixture/repo" && ls -laR | shasum); }
@@ -138,5 +140,38 @@ for value in "$kept" "$removed" "$ignored"; do
 done
 echo "ok   secrets: none of the three printed, in text, JSON or SARIF"
 expect "secrets: nothing written into the repository" "$([ "$(secrets_listing)" = "$secrets_before" ] && echo unchanged || echo changed)" "unchanged"
+
+# Container rules.
+boxes="$fixture/containers"
+mkdir -p "$boxes"
+cat > "$boxes/Dockerfile" <<'DOCKERFILE'
+FROM python:3.14-slim
+ADD https://example.com/tool.tar.gz /opt/
+RUN curl -fsSL https://example.com/install.sh | sh
+ENV DB_PASSWORD=smokepass77
+EXPOSE 8000
+DOCKERFILE
+cat > "$boxes/compose.yaml" <<'COMPOSE'
+services:
+  db:
+    image: postgres:17
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_USER: smokeuser77
+      POSTGRES_PASSWORD: smokeuser77
+  agent:
+    image: busybox:1.37
+    privileged: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+COMPOSE
+set +e
+report="$(run -v "$boxes:/scan:ro" "$image" scan /scan --no-advisories --format json 2>&1)"
+code=$?
+set -e
+expect "containers: exit code" "$code" "1"
+expect "containers: rules found" "$(echo "$report" | field 'sorted({f["rule"] for f in d["containers"]["findings"]})')" "['compose/database-port-published', 'compose/default-password', 'compose/docker-socket', 'compose/privileged', 'dockerfile/add-from-url', 'dockerfile/base-image-no-digest', 'dockerfile/no-healthcheck', 'dockerfile/pipe-to-shell', 'dockerfile/runs-as-root', 'dockerfile/secret-in-env']"
+case "$report" in *smokepass77*|*smokeuser77*) echo "FAIL a password was printed" >&2; exit 1;; esac
+echo "ok   containers: no password printed"
 
 echo "smoke test passed"

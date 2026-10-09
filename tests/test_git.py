@@ -5,6 +5,7 @@ random histories."""
 
 import os
 import random
+import types
 import zlib
 from pathlib import Path
 
@@ -321,3 +322,38 @@ def test_commit_headers() -> None:
     assert commit.tree == "a" * 40
     assert commit.parents == ("b" * 40, "c" * 40)
     assert commit.time == 1700000123
+
+
+def test_head_from_its_reflog_when_its_ref_is_not_on_disk(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = Repo(tmp_path / "r")
+    _history(repo, commits=3)
+    repo.git("checkout", "-q", "-b", "other")
+    repo.write("x.txt", "x")
+    last = repo.commit()
+    real_lstat = os.lstat
+    offline: set[str] = set()
+    git_dir = repo.path / ".git"
+
+    def lstat(path: str | Path) -> object:
+        st = real_lstat(path)
+        if os.path.relpath(str(path), str(git_dir)) in offline:
+            return types.SimpleNamespace(
+                st_mode=st.st_mode, st_size=st.st_size, st_flags=0x40000000
+            )
+        return st
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    for missing in ({"refs/heads/other"}, {"HEAD"}):
+        offline.clear()
+        offline.update(missing)
+        git = Repository.open(git_dir)
+        assert git.head() == last
+        assert git.head_from_reflog and not git.head_unknown
+        git.close()
+    offline.update({"logs/HEAD"})
+    git = Repository.open(git_dir)
+    assert git.head() is None
+    assert git.head_unknown
+    git.close()

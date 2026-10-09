@@ -79,6 +79,13 @@ class Repository:
     git_dir: Path
     notes: list[str] = field(default_factory=list)
     offline: set[str] = field(default_factory=set)  # under .git, not on disk
+    # Set by head(): HEAD could not be resolved because a file it needs (its
+    # branch's ref, say) is not on this disk. Then which commit is checked
+    # out is not known, which is not the same as there being none.
+    head_unknown: bool = False
+    # Set by head(): HEAD was read from its reflog, because HEAD or its
+    # branch's ref is not on this disk.
+    head_from_reflog: bool = False
     _packs: list[_Pack] = field(default_factory=list)
     _cache: dict[tuple[int, int], tuple[str, bytes]] = field(default_factory=dict)
     _cached_bytes: int = 0
@@ -134,17 +141,19 @@ class Repository:
 
     # -- refs --------------------------------------------------------------
 
-    def _resolve_ref(self, name: str, depth: int = 0) -> str | None:
+    def _resolve_ref(self, name: str, depth: int = 0, head: bool = False) -> str | None:
         if depth > 5:
             return None
         path = self.git_dir / name
         state = self._state(path)
         if state == "offline":
+            if head:
+                self.head_unknown = True
             return None  # not the packed value: that may be an older one
         if state == "file":
             text = path.read_text(encoding="utf-8", errors="replace").strip()
             if text.startswith("ref: "):
-                return self._resolve_ref(text[5:].strip(), depth + 1)
+                return self._resolve_ref(text[5:].strip(), depth + 1, head)
             return text if _SHA_HEX.fullmatch(text) else None
         return self._packed_refs().get(name)
 
@@ -162,8 +171,37 @@ class Repository:
         return refs
 
     def head(self) -> str | None:
-        """The commit checked out (None in a repository with no commits)."""
-        return self._resolve_ref("HEAD")
+        """The commit checked out: None in a repository with no commits, or
+        when that cannot be known (``head_unknown``).
+
+        When HEAD, or the branch it names, is not on this disk, HEAD's own
+        reflog (``logs/HEAD``) says: git adds a line to it whenever HEAD
+        changes, a commit on the branch included, so its last line's new
+        value is HEAD now (``head_from_reflog``)."""
+        self.head_unknown = False
+        self.head_from_reflog = False
+        sha = self._resolve_ref("HEAD", head=True)
+        if sha is None and self.head_unknown:
+            logged = self._reflog_tip("logs/HEAD")
+            if logged is not None:
+                self.head_unknown = False
+                self.head_from_reflog = True
+                return logged
+        return sha
+
+    def _reflog_tip(self, name: str) -> str | None:
+        """The value a reflog says its ref has now: its last line's new
+        value ("<old> <new> <who> <when>\t<message>")."""
+        text = self._text(self.git_dir / name)
+        if not text:
+            return None
+        lines = [line for line in text.splitlines() if line.strip()]
+        if not lines:
+            return None
+        fields = lines[-1].split(" ", 2)
+        if len(fields) < 2 or not _SHA_HEX.fullmatch(fields[1]):
+            return None
+        return None if fields[1] == "0" * 40 else fields[1]
 
     def refs(self) -> dict[str, str]:
         """Every ref's name and the object it names (commits or tags)."""
@@ -455,6 +493,30 @@ def parse_tree(data: bytes) -> list[tuple[int, str, str]]:
     return entries
 
 
+def file_at(repo: Repository, commit: str, path: str) -> bytes | None:
+    """The content of the file at ``path`` in ``commit`` (None if there is
+    no regular file there)."""
+    kind, data = repo.read(commit)
+    if kind != "commit":
+        return None
+    tree = parse_commit(commit, data).tree
+    parts = path.split("/")
+    for n, part in enumerate(parts):
+        kind, data = repo.read(tree)
+        found = {name: (mode, sha) for mode, name, sha in parse_tree(data)}
+        if part not in found:
+            return None
+        mode, sha = found[part]
+        if n == len(parts) - 1:
+            if mode & 0o170000 != 0o100000:
+                return None
+            return repo.read(sha)[1]
+        if mode != MODE_TREE:
+            return None
+        tree = sha
+    return None
+
+
 def blob_id(content: bytes) -> str:
     """The id git gives this content as a file (``git hash-object``)."""
     header = f"blob {len(content)}\0".encode()
@@ -484,6 +546,7 @@ class History:
     occurrences: tuple[Occurrence, ...]
     missing: int  # objects named but not present (shallow or partial clones)
     remotes: bool  # whether any remote-tracking ref exists
+    head_known: bool = True  # False: HEAD's ref is not on this disk
 
 
 @dataclass
@@ -577,6 +640,7 @@ def walk_history(repo: Repository, everything: bool = True) -> History:
         return trees[sha]
 
     head = repo.head()
+    head_known = not repo.head_unknown
     in_head: set[tuple[str, str]] = set()
     if head is not None and head in commits:
 
@@ -625,4 +689,6 @@ def walk_history(repo: Repository, everything: bool = True) -> History:
         )
         for (path, blob), first in sorted(found.items())
     )
-    return History(head, len(commits), occurrences, missing, bool(remote_tips))
+    return History(
+        head, len(commits), occurrences, missing, bool(remote_tips), head_known
+    )
