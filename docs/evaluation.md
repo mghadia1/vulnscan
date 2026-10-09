@@ -169,4 +169,23 @@ whole-scan time was not seen).
 ## Fixes
 
 Chosen by me (the roadmap: "fixes to the affected repos only where I
-choose"); see the session log in the roadmap.
+choose"), from four offered: closing the databases, upgrading pip in 11
+environments, upgrading the other vulnerable libraries in their
+environments, and updating LinkForge's test tooling. **I chose the first
+only.**
+
+- **LinkForge and PaperTrail publish their databases on localhost only**
+  (`127.0.0.1:5432:5432`, and LinkForge's Redis `127.0.0.1:6379:6379`),
+  as SurgiServe already did. Committed on a branch in each repository,
+  `fix/compose-databases-localhost` (LinkForge 9ffdb67, PaperTrail
+  183c496), not merged and not pushed. Checked: both files still pass
+  `docker compose config`; VulnScan on each repository finds exactly the
+  three `database-port-published` findings gone and nothing else changed;
+  PaperTrail's tests pass (91; 4 that need the database were skipped,
+  since Docker would not start that day). LinkForge's API tests need Docker
+  too and were not run; the change touches only the Compose file and a
+  README line. The default passwords stay: local development values, now
+  reachable from this machine only.
+- **Not changed, on purpose:** the dependency findings (pip, pypdf, urllib3,
+  mako, multidict, accelerate, cryptography, LinkForge's Vitest), the
+  Dockerfile findings, and the passwords.
