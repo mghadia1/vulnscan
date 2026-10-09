@@ -51,7 +51,9 @@ def test_text_report(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["scan", str(repo)]) == EXIT_CLEAN
     out = capsys.readouterr().out
     assert "4 files, 3 of them manifests" in out
-    assert "npm-lock" in out and "web/package-lock.json" in out
+    assert "Dockerfile: container rules come in Milestone 5" in out
+    # The fixture's lockfile is empty: a problem, named, not a crash.
+    assert 'web/package-lock.json: no "packages" object' in out
     assert "no findings" in out
 
 

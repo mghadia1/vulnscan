@@ -16,7 +16,16 @@ fixture="$(mktemp -d)"
 trap 'rm -rf "$fixture"' EXIT
 mkdir -p "$fixture/repo/web" "$fixture/outside"
 printf '[project]\nname = "fixture"\n' > "$fixture/repo/pyproject.toml"
-printf '{}\n' > "$fixture/repo/web/package-lock.json"
+cat > "$fixture/repo/web/package-lock.json" <<'JSON'
+{
+  "lockfileVersion": 3,
+  "packages": {
+    "": {"name": "web", "dependencies": {"ws": "^8.0.0"}},
+    "node_modules/ws": {"version": "8.22.0"}
+  }
+}
+JSON
+printf 'Django==5.1.2\nrequests>=2.31\n' > "$fixture/repo/requirements.txt"
 printf 'FROM python:3.14-slim\n' > "$fixture/repo/Dockerfile"
 printf 'module example.com/x\n' > "$fixture/outside/go.mod"
 ln -s ../outside "$fixture/repo/linked"
@@ -31,7 +40,8 @@ expect "runs as uid" "$(docker run --rm --network none --entrypoint id "$image" 
 
 report="$(scan scan /scan --format json)"
 expect "scan exit code" "$?" "0"
-expect "files recognised" "$(echo "$report" | field 'sorted(f["kind"] for f in d["files"])')" "['dockerfile', 'npm-lock', 'pyproject']"
+expect "files recognised" "$(echo "$report" | field 'sorted(f["kind"] for f in d["files"])')" "['dockerfile', 'npm-lock', 'pyproject', 'requirements']"
+expect "packages found" "$(echo "$report" | field 'sorted((p["name"], p.get("version"), p["how"]) for p in d["inventory"]["packages"])')" "[('django', '5.1.2', 'pinned'), ('requests', None, 'declared'), ('ws', '8.22.0', 'locked')]"
 expect "link recorded" "$(echo "$report" | field 'd["symlinks"]')" "['linked']"
 expect "link not followed" "$(echo "$report" | field '[f["path"] for f in d["files"] if "go.mod" in f["path"]]')" "[]"
 expect "text report by default" "$(scan | head -1)" "vulnscan 0.1.0: /scan"
