@@ -26,18 +26,26 @@ def repo(tmp_path: Path) -> Path:
 
 
 def test_json_report(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["scan", str(repo), "--format", "json"]) == EXIT_CLEAN
+    assert (
+        main(["scan", str(repo), "--format", "json", "--no-advisories"]) == EXIT_CLEAN
+    )
     report = json.loads(capsys.readouterr().out)
     assert report["tool"] == {"name": "vulnscan", "version": __version__}
-    assert report["schema"] == 1
+    assert report["schema"] == 2
     assert report["summary"] == {
         "files": 4,
         "recognized": 3,
         "environments": 1,
         "symlinks": 0,
         "errors": 0,
+        "packages": 0,
         "findings": 0,
+        "failing": 0,
+        "accepted": 0,
+        "undecided": 0,
+        "by_severity": {},
     }
+    assert report["advisories"] == {"checked": False}
     assert report["files"] == [
         {"path": "Dockerfile", "kind": "dockerfile"},
         {"path": "pyproject.toml", "kind": "pyproject"},
@@ -48,18 +56,19 @@ def test_json_report(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
 
 
 def test_text_report(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["scan", str(repo)]) == EXIT_CLEAN
+    assert main(["scan", str(repo), "--no-advisories"]) == EXIT_CLEAN
     out = capsys.readouterr().out
     assert "4 files, 3 of them manifests" in out
     assert "Dockerfile: container rules come in Milestone 5" in out
     # The fixture's lockfile is empty: a problem, named, not a crash.
     assert 'web/package-lock.json: no "packages" object' in out
-    assert "no findings" in out
+    assert "advisories not checked (--no-advisories)" in out
 
 
 def test_report_to_a_file(repo: Path, tmp_path: Path) -> None:
     out = tmp_path / "report.json"
-    assert main(["scan", str(repo), "--format", "json", "--output", str(out)]) == 0
+    args = ["scan", str(repo), "--format", "json", "--output", str(out)]
+    assert main([*args, "--no-advisories"]) == 0
     assert json.loads(out.read_text())["summary"]["recognized"] == 3
 
 
@@ -72,7 +81,7 @@ def test_the_scan_writes_nothing_into_the_target(repo: Path) -> None:
     before = snapshot()
     repo.chmod(0o555)  # and it does not need to
     try:
-        assert main(["scan", str(repo), "--format", "json"]) == EXIT_CLEAN
+        assert main(["scan", str(repo), "--format", "json", "--no-advisories"]) == 0
     finally:
         repo.chmod(0o755)
     assert snapshot() == before
@@ -97,7 +106,8 @@ def test_bad_options_exit_2() -> None:
 
 def test_runs_as_a_module(repo: Path) -> None:
     result = subprocess.run(
-        [sys.executable, "-m", "vulnscan", "scan", str(repo), "--format", "json"],
+        [sys.executable, "-m", "vulnscan", "scan", str(repo), "--format", "json"]
+        + ["--no-advisories"],
         capture_output=True,
         text=True,
         env={**os.environ, "PYTHONPATH": str(SRC)},

@@ -14,6 +14,9 @@ command could not be done (a bad path or option, no advisory data).
 import argparse
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
+from datetime import UTC, date, datetime, timedelta
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 from vulnscan import __version__
@@ -27,8 +30,13 @@ from vulnscan.advisories import (
 )
 from vulnscan.advisories.fetch import FetchError
 from vulnscan.advisories.osv import Verdict
-from vulnscan.report import Report
+from vulnscan.baseline import FILE_NAME, BaselineError, apply, load
+from vulnscan.findings import match as match_advisories
+from vulnscan.report import THRESHOLDS, Checked, Report
 from vulnscan.walk import walk
+
+# Advisories older than this are named in the report (not a failure).
+STALE_AFTER = timedelta(days=7)
 
 EXIT_CLEAN = 0
 EXIT_FINDINGS = 1
@@ -50,9 +58,28 @@ def _parser() -> argparse.ArgumentParser:
     scan.add_argument("path", type=Path, help="the repository (a directory)")
     scan.add_argument(
         "--format",
-        choices=("text", "json"),
+        choices=("text", "json", "sarif"),
         default="text",
-        help="text for people (default), json for tools",
+        help="text for people (default), json for tools, sarif for code scanning",
+    )
+    scan.add_argument(
+        "--fail-on",
+        choices=THRESHOLDS,
+        default="low",
+        help="exit 1 for a finding at or above this severity (default: low)",
+    )
+    scan.add_argument(
+        "--baseline",
+        type=Path,
+        help=f"accepted findings (default: {FILE_NAME} in the target, if there)",
+    )
+    scan.add_argument(
+        "--no-baseline", action="store_true", help="ignore any accepted findings"
+    )
+    scan.add_argument(
+        "--no-advisories",
+        action="store_true",
+        help="list the inventory only, without checking it",
     )
     scan.add_argument(
         "--output",
@@ -63,6 +90,7 @@ def _parser() -> argparse.ArgumentParser:
     data_help = (
         "where advisory data is kept (default: $VULNSCAN_DATA or ~/.cache/vulnscan)"
     )
+    scan.add_argument("--data", type=Path, help=data_help)
     upd = commands.add_parser("update", help="download and index OSV's advisories")
     upd.add_argument(
         "--ecosystem",
@@ -98,12 +126,90 @@ def _scan(args: argparse.Namespace) -> int:
         print(f"vulnscan: not a directory: {target}", file=sys.stderr)
         return EXIT_ERROR
     report = Report.from_tree(str(target), walk(target.resolve()))
-    text = report.to_json() if args.format == "json" else report.to_text()
+    report = replace(report, threshold=args.fail_on)
+    if not args.no_advisories:
+        checked = _check(args, target, report)
+        if isinstance(checked, int):
+            return checked
+        report = replace(report, checked=checked)
+    if args.format == "json":
+        text = report.to_json()
+    elif args.format == "sarif":
+        text = report.to_sarif()
+    else:
+        text = report.to_text()
     if args.output is None:
         sys.stdout.write(text)
     else:
         args.output.write_text(text, encoding="utf-8")
-    return EXIT_FINDINGS if report.findings else EXIT_CLEAN
+    if report.unchecked:
+        # Not everything could be checked: never a clean result.
+        print(
+            "vulnscan: not checked, no advisory data: "
+            + ", ".join(f"{n} {e} packages" for e, n in report.unchecked.items()),
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    return EXIT_FINDINGS if report.failed else EXIT_CLEAN
+
+
+def _check(args: argparse.Namespace, target: Path, report: Report) -> Checked | int:
+    """Matches the inventory against the advisories and applies the
+    baseline; an exit code if that cannot be done."""
+    path = (args.data or data_dir()) / DB_NAME
+    if not path.exists():
+        print(
+            f"vulnscan: no advisory data at {path}; run `vulnscan update` "
+            "(or --no-advisories for the inventory alone)",
+            file=sys.stderr,
+        )
+        return EXIT_ERROR
+    db = Database(path, readonly=True)
+    try:
+        snapshots = tuple(db.snapshots())
+        matching = match_advisories(report.inventory, db)
+    finally:
+        db.close()
+    baseline: Path | None = None
+    if not args.no_baseline:
+        baseline = args.baseline
+        if baseline is None and (target / FILE_NAME).is_file():
+            baseline = target / FILE_NAME
+    try:
+        acceptances = load(baseline) if baseline is not None else []
+    except BaselineError as error:
+        print(f"vulnscan: {error}", file=sys.stderr)
+        return EXIT_ERROR
+    applied = apply(matching.findings, acceptances, date.today())
+    notes = []
+    now = datetime.now(UTC)
+    for snapshot in snapshots:
+        when = _as_datetime(snapshot.last_modified) or _as_datetime(snapshot.built)
+        if when is not None and now - when > STALE_AFTER:
+            notes.append(
+                f"{snapshot.ecosystem} advisories are {(now - when).days} days old: "
+                "run `vulnscan update`"
+            )
+    return Checked(
+        snapshots=snapshots,
+        matching=matching,
+        applied=applied,
+        baseline=str(baseline) if baseline else None,
+        notes=tuple(notes),
+    )
+
+
+def _as_datetime(text: str | None) -> datetime | None:
+    if not text:
+        return None
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        pass
+    try:
+        return parsedate_to_datetime(text)  # an HTTP date, as servers send it
+    except TypeError, ValueError:
+        return None
 
 
 def _update(args: argparse.Namespace) -> int:

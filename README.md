@@ -15,12 +15,13 @@ It deliberately does not use pip-audit, safety, osv-scanner, npm audit,
 govulncheck, Trivy, Grype, Snyk, gitleaks, trufflehog, detect-secrets,
 hadolint or Checkov underneath: the point is to build what they do.
 
-> **Status:** Milestones 0-2 of 7. `vulnscan scan` walks a repository and
-> builds its inventory: every Python, npm and Go package it depends on,
-> with the version and how sure that version is. `vulnscan update` keeps a
-> local index of OSV's advisories, and `vulnscan lookup` says which affect
-> one package version, with version ordering written by hand. Scans do not
-> use the advisories yet (Milestone 3), so they report no findings.
+> **Status:** Milestones 0-3 of 7. `vulnscan scan` finds a repository's
+> Python, npm and Go dependencies (installed, locked, pinned or declared)
+> and checks them against a local index of OSV's advisories, with version
+> ordering and CVSS scoring written by hand: findings with severity and the
+> version that fixes them, as text, JSON or SARIF, failing CI above a
+> chosen severity unless accepted in a reviewed file. Secrets and container
+> rules are not built yet (Milestones 4-5).
 
 ## Status
 
@@ -29,7 +30,7 @@ hadolint or Checkov underneath: the point is to build what they do.
 | 0 | Skeleton: Python 3.14 package, a `vulnscan scan PATH` CLI with text and JSON output and exit codes; ruff, mypy --strict, pytest + Hypothesis; a non-root image that scans a folder mounted read-only; CI; a smoke test | Built |
 | 1 | Inventory: exactly what a repository depends on, from installed Python environments, lockfiles and manifests (Python, npm, Go) | Built |
 | 2 | Advisory data from OSV in a local index; version ordering for PEP 440, npm SemVer and Go, written by hand; OSV's affected ranges | Built |
-| 3 | Findings: packages matched to advisories, the fixing version, CVSS 3.1 scores; text, JSON and SARIF; `--fail-on`; a baseline file | Not started |
+| 3 | Findings: packages matched to advisories, the fixing version, CVSS 3.1 scores; text, JSON and SARIF; `--fail-on`; a baseline file | Built |
 | 4 | Secrets in files and git history, never shown in a finding | Not started |
 | 5 | Dockerfile and Compose rules | Not started |
 | 6 | Evaluation on my own repositories: every finding labelled by hand; dependency findings cross-checked against osv-scanner | Not started |
@@ -62,6 +63,13 @@ make update                      # OSV's exports for PyPI, npm and Go, into ~/.c
 make lookup Q="PyPI django 3.2.18"
 docker run --rm -v ~/.cache/vulnscan:/data vulnscan:local update
 docker run --rm --network none -v ~/.cache/vulnscan:/data:ro vulnscan:local lookup npm ws 8.17.0
+```
+
+In CI (the SARIF can go to GitHub code scanning):
+
+```bash
+vulnscan update
+vulnscan scan . --format sarif --output vulnscan.sarif --fail-on high
 ```
 
 `make smoke` builds the image and checks it from outside: it runs
@@ -263,6 +271,117 @@ covers it and there is no list.
   registry packages with an exact version, VulnScan's local index names
   exactly the advisories OSV's service does, 83 of them in all.
 
+## Findings
+
+A scan matches every package with an exact version (installed, locked or
+pinned) against the advisory index:
+
+- **One finding per package occurrence and vulnerability.** Advisories
+  that are aliases of each other (the same Go bug as GO-2024-2687 in Go's
+  database and GHSA-4v7x-pqxf-cx7m in GitHub's) are one finding, listing
+  every id; the preferred id first (GHSA, PYSEC, GO, MAL), CVE ids as
+  aliases. The same package in two environments is two findings: each needs
+  fixing.
+- **Severity:** the highest CVSS 3.x base score among the advisories,
+  computed here from their vectors (CVSS 3.1 §7.1, including its integer
+  Roundup); a score of 9.0+ is critical, 7.0+ high, 4.0+ medium, else low.
+  An advisory with only a CVSS 4.0 vector (not scored here: it is a
+  different method) or none falls back to GitHub's own word, and the
+  finding says which. A malicious package (OSV's MAL- reports) is critical
+  by definition. Otherwise the severity is **unknown**, which never passes
+  as harmless.
+- **The fix:** the lowest version that fixes every advisory of the
+  finding (from the ranges' "fixed" events above the version found), or
+  "no fixed version has been published".
+- **Undecided** (`possibly-vulnerable`): an advisory that could not be
+  compared with the version (see "Is a version affected?"), with the
+  reason. Reported, grouped by package, and never failing a scan.
+- **Not matched, and counted:** local packages (the project's own code),
+  and packages known only by a range: which version is used is not known.
+  That includes Go's standard library in a module with no `toolchain`
+  line (`go 1.27` only sets the oldest Go that may build it).
+
+### Reports and exit codes
+
+- `--format text` (for people; the default), `json` (schema 2: every
+  finding with its package, file, line, advisories, aliases, severity and
+  its source, vector, fix, references, a stable fingerprint, and whether it
+  is accepted and failing) or `sarif` (SARIF 2.1.0: one rule per
+  advisory, with the `security-severity` GitHub uses, one result per
+  finding at its file and line; checked against OASIS's schema).
+- `--fail-on low|medium|high|critical|never` (default low): exit 1 if any
+  decided, unaccepted finding is at or above it; an unknown severity is
+  never below it. Exit 0 otherwise.
+- **Exit 2 when the check could not be done:** no advisory data, or none
+  for an ecosystem the repository uses (its packages are named as not
+  checked). A scan that checked nothing must not pass CI; `--no-advisories`
+  lists the inventory alone, on purpose. Advisories more than 7 days old
+  are named in the report.
+
+### Accepting a finding
+
+In `.vulnscan.toml` at the root of the target (or `--baseline FILE`;
+`--no-baseline` ignores it), kept in the repository so that accepting a
+finding is a reviewed change:
+
+```toml
+[[accept]]
+advisory = "CVE-2024-37890"    # any id or alias of the finding
+package = "npm:ws"             # optional: this package only
+reason = "no untrusted clients reach this server"
+expires = 2026-12-31
+```
+
+A reason and an expiry date are required. An accepted finding is still
+reported, as accepted (and as a SARIF suppression, with the reason), and
+does not fail the scan, until its date passes: then it fails again, with a
+note. An acceptance that matches nothing is reported, so the file does not
+fill with entries for things long fixed. A file that is not valid (no
+reason, an unquoted or timed date, an unknown key) stops the scan.
+
+### How it is tested
+
+- **Planted vulnerabilities** (`tests/test_findings.py`): a repository
+  with known-vulnerable versions beside safe ones, scanned against six real
+  advisories copied from OSV (`tests/data/osv`): a malicious npm package
+  (critical), `ws` 8.17.0 (high, 7.5, fix 8.17.1), `golang.org/x/net`
+  v0.22.0 (GitHub's and Go's advisories, one finding, 5.3, fix 0.23.0), a
+  CVSS 4.0-only advisory (GitHub's rating), Django 3.2.18 and Go 1.22.1
+  (no score given: unknown) are each found exactly; `ws` 8.17.1, Django
+  4.2.16 and Flask 3.0.0 are not. The SARIF validates against the OASIS
+  schema; thresholds, acceptances (by alias, by package, expired, unused)
+  and missing data all behave as above.
+- **CVSS:** every one of the 2,592 combinations of the eight base metrics
+  scores exactly as the `cvss` library does (used only by the tests), and
+  published scores of known vulnerabilities (Log4Shell 10.0) come out right;
+  Roundup handles the floating-point case the specification warns about.
+- **15 planted bugs** each fail the tests: privileges not adjusted when
+  scope changes, Roundup by plain ceiling, the changed-scope impact formula
+  cut short, aliases not merged, the fix taken from the first range or the
+  lowest of a group, severity from the first advisory, unknown severity
+  passing, undecided findings failing, expired or other packages'
+  acceptances holding, unused ones not reported, an unchecked ecosystem
+  passing, malicious packages not critical, SARIF without its
+  security-severity.
+- **Against GitHub's own ratings:** for the 11,175 GitHub advisories in the
+  index with only a CVSS 3 vector, VulnScan's rating from the vector is
+  GitHub's word in 11,085 (99.2%; `scripts/check_cvss.py`). Since the
+  scores match the reference library everywhere, the other 90 are GitHub's
+  choice of word. Where an advisory also has a CVSS 4.0 vector the match is
+  69.5%: GitHub then rates by 4.0.
+- **On my portfolio** (2026-10-08, with that day's advisories): 1,679
+  packages; 1,479 checked, 172 known only as ranges, 28 local. **73
+  findings** fail the default threshold (2 critical, 30 high, 40 medium, 1
+  low) in 14 package versions across 14 projects, 68 of them packages
+  installed in virtual environments (pip itself in most) and 5 from npm
+  lockfiles; the decided ones are the advisories OSV's own service names
+  (Milestone 2). 73 more are undecided: 72 are nine PyPA advisories for
+  `torch` whose own ranges use versions that are not PEP 440
+  ("2.6.0-cu124"), one a `go-redis` advisory with a range bound "9.6.0b1".
+  The SARIF for the whole portfolio validates against the schema. A scan
+  takes 1.5-2.3 s; the first after the update took 45 s, reading the 123 MB
+  index from disk on a machine that was swapping.
+
 ## Development
 
 ```bash
@@ -292,6 +411,12 @@ install does not work outside pytest.
 | `src/vulnscan/advisories/osv.py` | Reading an advisory, and the OSV evaluation |
 | `src/vulnscan/advisories/db.py`, `fetch.py`, `__init__.py` | The SQLite index; the checked download; update and lookup |
 | `scripts/check_ranges.py`, `scripts/check_against_osv_api.py` | The evaluation against OSV's lists, and against OSV's own service |
+| `src/vulnscan/findings.py` | Matching the inventory to advisories: grouping aliases, severity, the fix |
+| `src/vulnscan/cvss.py` | CVSS 3 base scores, from the vector |
+| `src/vulnscan/baseline.py` | Accepted findings (`.vulnscan.toml`) |
+| `src/vulnscan/sarif.py` | Findings as SARIF 2.1.0 |
+| `scripts/check_cvss.py` | The computed ratings against GitHub's |
+| `tests/data/` | Six real advisories and the OASIS SARIF schema, with where they came from |
 | `tests/` | The walker (random trees with Hypothesis), the classifier, each reader (fixtures, generated files, fuzzing, pip as a reference), the CLI |
 | `scripts/smoke.sh` | Checks the image from outside |
 
@@ -331,3 +456,12 @@ install does not work outside pytest.
    the gem's versions. Restricted to the export's own ecosystem: 168 of
    169. The evaluation itself had been right, and says "unknown" for an
    ecosystem it cannot order.
+7. **Two tests read my real advisory data.** Scans began to need the index,
+   and the CLI tests that did not name a data folder found the one in
+   `~/.cache`. Every test now gets an empty data folder unless it builds
+   its own (a pytest fixture), so no test depends on this machine.
+8. **A smoke check could fail by the clock.** "Nothing written into the
+   target" compared folder listings after the script had itself written
+   and removed a `.vulnscan.toml` there; the folder's time changed, and only
+   the listing's minute resolution hid it. The check now runs before the
+   script writes anything.
