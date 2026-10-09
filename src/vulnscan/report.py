@@ -2,7 +2,10 @@
 code scanning, text for people.
 
 The JSON has a schema number; a change to its meaning raises it (2: the
-findings, with their advisories, severity, fix and acceptance).
+findings, with their advisories, severity, fix and acceptance; 3: secrets).
+
+No output contains a secret: a secret finding carries its rule, place,
+redacted form (a fixed prefix at most, and the length) and fingerprint.
 """
 
 import json
@@ -17,9 +20,10 @@ from vulnscan.classify import Kind, classify
 from vulnscan.findings import SEVERITIES, Finding, Matching, severity_rank
 from vulnscan.inventory import Inventory, build
 from vulnscan.sarif import to_sarif
+from vulnscan.secrets import AppliedSecrets, SecretFinding, SecretScan, commit_date
 from vulnscan.walk import Tree
 
-SCHEMA = 2
+SCHEMA = 3
 THRESHOLDS = ("low", "medium", "high", "critical", "never")
 
 
@@ -35,6 +39,15 @@ class Checked:
 
 
 @dataclass(frozen=True)
+class SecretsChecked:
+    """What the secret scan did."""
+
+    scan: SecretScan
+    applied: AppliedSecrets
+    baseline: str | None
+
+
+@dataclass(frozen=True)
 class Report:
     target: str
     tree: Tree
@@ -42,6 +55,7 @@ class Report:
     inventory: Inventory
     checked: Checked | None = None  # None: --no-advisories
     threshold: str = "low"
+    secrets: SecretsChecked | None = None  # None: --no-secrets
 
     @classmethod
     def from_tree(cls, target: str, tree: Tree) -> Report:
@@ -67,8 +81,23 @@ class Report:
         )
 
     @property
+    def secret_findings(self) -> tuple[SecretFinding, ...]:
+        return self.secrets.applied.findings if self.secrets else ()
+
+    def failing_secret(self, finding: SecretFinding) -> bool:
+        """As for advisories; a secret that is not committed never fails."""
+        return (
+            self.threshold != "never"
+            and finding.state != "uncommitted"
+            and finding.accepted is None
+            and severity_rank(finding.severity) >= severity_rank(self.threshold)
+        )
+
+    @property
     def failed(self) -> bool:
-        return any(self.failing(f) for f in self.findings)
+        return any(self.failing(f) for f in self.findings) or any(
+            self.failing_secret(f) for f in self.secret_findings
+        )
 
     @property
     def unchecked(self) -> dict[str, int]:
@@ -138,6 +167,89 @@ class Report:
                     key=lambda item: -severity_rank(item[0]),
                 )
             ),
+            "repositories": len(self.tree.repositories),
+            "secrets": len(self.secret_findings),
+            "secrets_failing": sum(
+                self.failing_secret(f) for f in self.secret_findings
+            ),
+            "secrets_by_state": dict(
+                Counter(f.state for f in self.secret_findings).most_common()
+            ),
+        }
+
+    def _secret(self, f: SecretFinding) -> dict[str, Any]:
+        return {
+            "rule": f.rule,
+            "title": f.title,
+            "severity": f.severity,
+            "path": f.path,
+            "line": f.line,
+            "column": f.column,
+            "shown": f.shown,
+            "fingerprint": f.fingerprint,
+            "state": f.state,
+            "repository": f.repository,
+            "commit": f.commit,
+            "commit_date": commit_date(f),
+            "pushed": f.pushed,
+            "note": f.note,
+            "advice": f.advice,
+            "accepted": (
+                {"reason": f.accepted.reason, "expires": f.accepted.expires.isoformat()}
+                if f.accepted
+                else None
+            ),
+            "failing": self.failing_secret(f),
+        }
+
+    def _secrets_json(self) -> dict[str, Any]:
+        s = self.secrets
+        if s is None:
+            return {"checked": False}
+        return {
+            "checked": True,
+            "history": "all refs" if s.scan.history else "HEAD only",
+            "files_scanned": s.scan.files_scanned,
+            "skipped": {
+                "binary": s.scan.skipped_binary,
+                "large": s.scan.skipped_large,
+                "unreadable": list(s.scan.unreadable),
+                "not_on_disk": [
+                    {"path": path, "in_head": in_head}
+                    for path, in_head in s.scan.offline
+                ],
+            },
+            "repositories": [
+                {
+                    "path": r.path,
+                    "head": r.head,
+                    "commits": r.commits,
+                    "blobs": r.blobs,
+                    "missing_objects": r.missing,
+                    "not_on_disk": r.offline,
+                    "remotes": r.remotes,
+                    "error": r.error,
+                    "notes": list(r.notes),
+                }
+                for r in s.scan.repositories
+            ],
+            "findings": [self._secret(f) for f in s.applied.findings],
+            "baseline": {
+                "file": s.baseline,
+                "expired": [
+                    {
+                        "secret": a.secret,
+                        "expires": a.expires.isoformat(),
+                        "reason": a.reason,
+                        "path": f.path,
+                    }
+                    for a, f in s.applied.expired
+                ],
+                "unused": [
+                    {"secret": a.secret, "expires": a.expires.isoformat()}
+                    for a in s.applied.unused
+                ],
+            },
         }
 
     def to_json(self) -> str:
@@ -186,6 +298,7 @@ class Report:
                 else {"checked": False}
             ),
             "findings": [self._finding(f) for f in self.findings],
+            "secrets": self._secrets_json(),
             "baseline": (
                 {
                     "file": c.baseline,
@@ -215,7 +328,9 @@ class Report:
         return json.dumps(document, indent=2) + "\n"
 
     def to_sarif(self) -> str:
-        return json.dumps(to_sarif(self.findings), indent=2) + "\n"
+        return (
+            json.dumps(to_sarif(self.findings, self.secret_findings), indent=2) + "\n"
+        )
 
     def to_text(self) -> str:
         t = self.tree
@@ -258,7 +373,92 @@ class Report:
                 for p in inv.problems
             ]
         lines += self._text_findings()
+        lines += self._text_secrets()
         return "\n".join(lines) + "\n"
+
+    def _text_secrets(self) -> list[str]:
+        s = self.secrets
+        if s is None:
+            return ["secrets not checked (--no-secrets)"]
+        scan = s.scan
+        commits = sum(r.commits for r in scan.repositories)
+        lines = [
+            f"secrets: {scan.files_scanned} files and the history of "
+            f"{len(scan.repositories)} git "
+            f"{'repository' if len(scan.repositories) == 1 else 'repositories'} "
+            f"({commits} commits, "
+            f"{'all refs' if scan.history else 'HEAD only'}); "
+            f"{scan.skipped_binary} binary and {scan.skipped_large} large "
+            "files skipped"
+        ]
+        if scan.offline:
+            in_head = sum(1 for _, h in scan.offline if h)
+            lines.append(
+                f"  {len(scan.offline)} files not on this disk (iCloud "
+                f"placeholders) not read: {in_head} have a committed version, "
+                f"scanned from git; {len(scan.offline) - in_head} not scanned"
+            )
+        for r in scan.repositories:
+            if r.error:
+                lines.append(f"  NOT READ: {r.path}/.git: {r.error}")
+            if r.offline:
+                lines.append(
+                    f"  {r.path}: {r.offline} files under .git not on this disk "
+                    "(iCloud) and not read: its history may be incomplete"
+                )
+            if r.missing:
+                lines.append(
+                    f"  {r.path}: {r.missing} objects missing or not on this disk"
+                )
+            lines += [f"  {r.path}: {note}" for note in r.notes]
+        found = s.applied.findings
+        live = [f for f in found if f.state != "uncommitted" and not f.accepted]
+        accepted = [f for f in found if f.accepted is not None]
+        local = [f for f in found if f.state == "uncommitted" and not f.accepted]
+        failing = sum(self.failing_secret(f) for f in found)
+        lines.append(f"{len(live)} secrets, {failing} failing")
+        for f in live:
+            lines += self._secret_lines(f)
+        if accepted:
+            lines.append(f"{len(accepted)} accepted (not failing):")
+            for f in accepted:
+                assert f.accepted is not None
+                lines += self._secret_lines(f)
+                lines.append(
+                    f"           accepted until {f.accepted.expires}: "
+                    f"{f.accepted.reason}"
+                )
+        if local:
+            lines.append(f"{len(local)} in files not committed (not failing):")
+            for f in local:
+                lines += self._secret_lines(f)
+        for acceptance, finding in s.applied.expired:
+            lines.append(
+                f"  acceptance of secret {acceptance.secret} expired "
+                f"{acceptance.expires} ({finding.path}): failing again"
+            )
+        for acceptance in s.applied.unused:
+            lines.append(
+                f"  acceptance of secret {acceptance.secret} matches no finding "
+                f"({s.baseline}): remove it?"
+            )
+        return lines
+
+    def _secret_lines(self, f: SecretFinding) -> list[str]:
+        where = {
+            "committed": "in HEAD",
+            "history": "in history only",
+            "file": "in a file",
+            "uncommitted": "not committed",
+        }[f.state]
+        if f.commit:
+            where += f", first in {f.commit[:10]} ({commit_date(f)})"
+        note = f"; {f.note}" if f.note else ""
+        return [
+            f"  {f.severity.upper():<8} {f.rule}  {f.path}:{f.line}:{f.column}",
+            f"           {f.shown}{note}; {where}; fingerprint {f.fingerprint}",
+            f"           {f.advice}",
+        ]
 
     def _text_findings(self) -> list[str]:
         c = self.checked

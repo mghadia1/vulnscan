@@ -6,7 +6,10 @@
 # code 1, valid-looking SARIF, an accepted finding passing, a link out of
 # the repository recorded and not followed, nothing written into the
 # target; a scan without data refusing to pass; and exit code 2 for a
-# target that is not there.
+# target that is not there. Then secrets: a git repository (made on the
+# host, owned by another user than the container's, with no git in the
+# image) whose fake secrets are found in HEAD, in history and in an
+# ignored file, and never printed in any format.
 set -euo pipefail
 image="${1:-vulnscan:local}"
 
@@ -100,5 +103,40 @@ scan scan /nowhere > /dev/null 2>&1
 code=$?
 set -e
 expect "a missing target exits with" "$code" "2"
+
+# Secrets: fake tokens made here, at random, so that no file holds one.
+secrets="$fixture/secrets"
+mkdir -p "$secrets"
+token() { python3 -c "import secrets,string; a=string.ascii_letters+string.digits; print('gh'+'p_'+''.join(secrets.choice(a) for _ in range(36)))"; }
+kept="$(token)"; removed="$(token)"; ignored="$(token)"
+g() { git -C "$secrets" -c user.name=smoke -c user.email=smoke@example.invalid -c commit.gpgsign=false "$@"; }
+g init -q -b main
+printf '.env\n' > "$secrets/.gitignore"
+printf 'TOKEN = "%s"\n' "$kept" > "$secrets/app.py"
+printf 'TOKEN = "%s"\n' "$removed" > "$secrets/old.py"
+g add -A && g commit -q -m first
+g rm -q old.py && g commit -q -m "remove old.py"
+printf 'TOKEN=%s\n' "$ignored" > "$secrets/.env"
+secrets_listing() { (cd "$secrets" && ls -laR | shasum); }
+secrets_before="$(secrets_listing)"
+sscan() { run -v "$secrets:/scan:ro" "$image" scan /scan --no-advisories "$@"; }
+
+set +e
+report="$(sscan --format json 2>&1)"
+code=$?
+text="$(sscan 2>&1)"
+sarif="$(sscan --format sarif 2>&1)"
+set -e
+expect "secrets: exit code" "$code" "1"
+expect "secrets: where each is" "$(echo "$report" | field 'sorted((f["path"], f["rule"], f["state"]) for f in d["secrets"]["findings"])')" "[('.env', 'github-token', 'uncommitted'), ('app.py', 'github-token', 'committed'), ('old.py', 'github-token', 'history')]"
+expect "secrets: history read without git" "$(echo "$report" | field 'd["secrets"]["repositories"][0]["commits"], d["secrets"]["repositories"][0]["error"]')" "2 None"
+for value in "$kept" "$removed" "$ignored"; do
+  random_part="${value:4}"
+  for output in "$report" "$text" "$sarif"; do
+    case "$output" in *"$random_part"*|*"${random_part:0:12}"*) echo "FAIL a secret was printed" >&2; exit 1;; esac
+  done
+done
+echo "ok   secrets: none of the three printed, in text, JSON or SARIF"
+expect "secrets: nothing written into the repository" "$([ "$(secrets_listing)" = "$secrets_before" ] && echo unchanged || echo changed)" "unchanged"
 
 echo "smoke test passed"

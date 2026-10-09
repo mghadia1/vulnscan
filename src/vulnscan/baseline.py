@@ -8,6 +8,11 @@ finding is a reviewed change like any other.
     reason = "no untrusted clients reach this server"
     expires = 2026-12-31
 
+    [[accept]]
+    secret = "3f9c0a1b2c3d4e5f"          # a secret finding's fingerprint
+    reason = "a fake key the tests are built around"
+    expires = 2027-03-31
+
 Every acceptance needs a reason and an expiry date: an acceptance is a
 decision to revisit, not a way to make a finding disappear. An accepted
 finding is still reported (as accepted), and does not fail the scan; once
@@ -16,6 +21,7 @@ expired. An acceptance that matches no finding is reported too, so the
 file does not fill with entries for things long fixed.
 """
 
+import re
 import tomllib
 from dataclasses import dataclass, replace
 from datetime import date
@@ -24,7 +30,8 @@ from pathlib import Path
 from vulnscan.findings import Acceptance, Finding
 
 FILE_NAME = ".vulnscan.toml"
-_KEYS = {"advisory", "package", "reason", "expires"}
+_KEYS = {"advisory", "package", "reason", "expires", "secret"}
+_FINGERPRINT = re.compile(r"[0-9a-f]{16}")
 
 
 class BaselineError(Exception):
@@ -57,8 +64,21 @@ def load(path: Path) -> list[Acceptance]:
             entry.get("reason"),
             entry.get("expires"),
         )
-        package = entry.get("package")
-        if not isinstance(advisory, str) or not advisory.strip():
+        package, secret = entry.get("package"), entry.get("secret")
+        if (advisory is None) == (secret is None):
+            raise BaselineError(
+                f'{where}: needs advisory = "<id or alias>" or secret = '
+                '"<fingerprint>" (one of them)'
+            )
+        if secret is not None:
+            if not isinstance(secret, str) or not _FINGERPRINT.fullmatch(secret):
+                raise BaselineError(
+                    f"{where}: secret must be a fingerprint (16 hex digits), "
+                    "never the secret itself"
+                )
+            if package is not None:
+                raise BaselineError(f"{where}: package is for advisories")
+        elif not isinstance(advisory, str) or not advisory.strip():
             raise BaselineError(f'{where}: needs advisory = "<id or alias>"')
         if not isinstance(reason, str) or not reason.strip():
             raise BaselineError(f"{where}: needs a reason")
@@ -67,7 +87,15 @@ def load(path: Path) -> list[Acceptance]:
             raise BaselineError(f"{where}: needs expires = YYYY-MM-DD (a TOML date)")
         if package is not None and (not isinstance(package, str) or ":" not in package):
             raise BaselineError(f'{where}: package must be "ecosystem:name"')
-        accepted.append(Acceptance(advisory.strip(), package, reason.strip(), expires))
+        accepted.append(
+            Acceptance(
+                advisory.strip() if isinstance(advisory, str) else None,
+                package,
+                reason.strip(),
+                expires,
+                secret,
+            )
+        )
     return accepted
 
 
@@ -79,7 +107,7 @@ class Applied:
 
 
 def _matches(acceptance: Acceptance, finding: Finding) -> bool:
-    if acceptance.advisory.upper() not in finding.ids:
+    if acceptance.advisory is None or acceptance.advisory.upper() not in finding.ids:
         return False
     p = finding.package
     return acceptance.package is None or acceptance.package == f"{p.ecosystem}:{p.name}"
@@ -88,6 +116,8 @@ def _matches(acceptance: Acceptance, finding: Finding) -> bool:
 def apply(
     findings: tuple[Finding, ...], acceptances: list[Acceptance], today: date
 ) -> Applied:
+    """Advisory acceptances only; secrets.apply does the same for secrets."""
+    acceptances = [a for a in acceptances if a.advisory is not None]
     used: set[int] = set()
     expired: list[tuple[Acceptance, Finding]] = []
     result: list[Finding] = []

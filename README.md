@@ -15,13 +15,16 @@ It deliberately does not use pip-audit, safety, osv-scanner, npm audit,
 govulncheck, Trivy, Grype, Snyk, gitleaks, trufflehog, detect-secrets,
 hadolint or Checkov underneath: the point is to build what they do.
 
-> **Status:** Milestones 0-3 of 7. `vulnscan scan` finds a repository's
+> **Status:** Milestones 0-4 of 7. `vulnscan scan` finds a repository's
 > Python, npm and Go dependencies (installed, locked, pinned or declared)
 > and checks them against a local index of OSV's advisories, with version
 > ordering and CVSS scoring written by hand: findings with severity and the
 > version that fixes them, as text, JSON or SARIF, failing CI above a
-> chosen severity unless accepted in a reviewed file. Secrets and container
-> rules are not built yet (Milestones 4-5).
+> chosen severity unless accepted in a reviewed file. It also finds secrets
+> (known token formats, private keys, JWTs, high-entropy values with a
+> secret's name) in the files and in the whole git history, read by hand
+> without running git, and never prints one. Container rules are not built
+> yet (Milestone 5).
 
 ## Status
 
@@ -31,7 +34,7 @@ hadolint or Checkov underneath: the point is to build what they do.
 | 1 | Inventory: exactly what a repository depends on, from installed Python environments, lockfiles and manifests (Python, npm, Go) | Built |
 | 2 | Advisory data from OSV in a local index; version ordering for PEP 440, npm SemVer and Go, written by hand; OSV's affected ranges | Built |
 | 3 | Findings: packages matched to advisories, the fixing version, CVSS 3.1 scores; text, JSON and SARIF; `--fail-on`; a baseline file | Built |
-| 4 | Secrets in files and git history, never shown in a finding | Not started |
+| 4 | Secrets in files and git history, never shown in a finding | Built |
 | 5 | Dockerfile and Compose rules | Not started |
 | 6 | Evaluation on my own repositories: every finding labelled by hand; dependency findings cross-checked against osv-scanner | Not started |
 | 7 | README: diagram, decisions, failures, results; explain-it-yourself prompts | Not started |
@@ -65,6 +68,14 @@ docker run --rm -v ~/.cache/vulnscan:/data vulnscan:local update
 docker run --rm --network none -v ~/.cache/vulnscan:/data:ro vulnscan:local lookup npm ws 8.17.0
 ```
 
+Secrets are part of every scan (`--no-secrets` leaves them out;
+`--no-history` reads only the commit checked out):
+
+```bash
+make scan TARGET=../some-repo
+docker run --rm --network none -v "$PWD:/scan:ro" vulnscan:local scan /scan --no-advisories
+```
+
 In CI (the SARIF can go to GitHub code scanning):
 
 ```bash
@@ -82,7 +93,9 @@ writes nothing into the target.
 - **The target directory, and nothing outside it.** Symbolic links are
   listed, never followed: a link in a repository can point anywhere on the
   machine. Nothing is written.
-- **Not:** `.git`, `node_modules`, `__pycache__` and tool caches. A Python
+- **Not walked:** `.git`, `node_modules`, `__pycache__` and tool caches.
+  A `.git` folder marks a repository whose history the secret scan reads
+  (by hand, read-only: see "Secrets"). A Python
   virtual environment is recognised by its `pyvenv.cfg` (whatever the
   folder is called) and listed separately: its installed packages are what
   the inventory (Milestone 1) will read.
@@ -303,12 +316,13 @@ pinned) against the advisory index:
 
 ### Reports and exit codes
 
-- `--format text` (for people; the default), `json` (schema 2: every
+- `--format text` (for people; the default), `json` (schema 3: every
   finding with its package, file, line, advisories, aliases, severity and
   its source, vector, fix, references, a stable fingerprint, and whether it
-  is accepted and failing) or `sarif` (SARIF 2.1.0: one rule per
-  advisory, with the `security-severity` GitHub uses, one result per
-  finding at its file and line; checked against OASIS's schema).
+  is accepted and failing; and the secrets, see "Secrets") or `sarif`
+  (SARIF 2.1.0: one rule per advisory and per secret rule, with the
+  `security-severity` GitHub uses, one result per finding at its file and
+  line; checked against OASIS's schema).
 - `--fail-on low|medium|high|critical|never` (default low): exit 1 if any
   decided, unaccepted finding is at or above it; an unknown severity is
   never below it. Exit 0 otherwise.
@@ -382,6 +396,206 @@ reason, an unquoted or timed date, an unknown key) stops the scan.
   takes 1.5-2.3 s; the first after the update took 45 s, reading the 123 MB
   index from disk on a machine that was swapping.
 
+## Secrets
+
+Every scan looks for secrets in the target's files and in the history of
+every git repository in it. **No output ever contains a secret:** a
+finding gives its rule, file, line and column, the length, a format's fixed
+prefix at most (`ghp_`, `AKIA`: the same in every token of that kind), and
+a fingerprint.
+
+### What is found
+
+| Rule | Severity | Shape |
+|------|----------|-------|
+| `aws-access-key-id` | high | AKIA, ASIA, ABIA or ACCA, then 16 base32 characters |
+| `github-token`, `github-fine-grained-token` | high | `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` + 36; `github_pat_` + 22 + `_` + 59 |
+| `slack-token` | high | `xoxb-` (and a, e, o, p, r, s) with its numeric parts |
+| `slack-webhook` | medium | `https://hooks.slack.com/services/...` |
+| `stripe-secret-key`, `stripe-test-key` | high, low | `sk_live_`/`rk_live_`; `sk_test_` (test mode only). Publishable `pk_` keys are public and not found |
+| `anthropic-api-key`, `openai-api-key`, `huggingface-token`, `groq-api-key` | high | `sk-ant-api03-...`; `sk-...T3BlbkFJ...` ("OpenAI" in base64); `hf_` + 34; `gsk_` + 52 |
+| `google-api-key` | medium | `AIza` + 35: often public by design (a Maps key restricted to a site) |
+| `private-key` | high; medium if encrypted | a `-----BEGIN ... PRIVATE KEY-----` block with at least 64 base64 characters and its END line, also with its lines joined by `\n` escapes (JSON) or quoted one per line (a notebook). Encrypted: PKCS#8 `ENCRYPTED`, legacy PEM's `Proc-Type: 4,ENCRYPTED`, or an OpenSSH key whose own header names a cipher |
+| `jwt` | medium; low once expired | three base64url parts whose header is JSON with an `alg` (not `none`); the payload's `exp` says whether it has expired |
+| `secret-assignment` | medium | a value of 16+ token characters, with letters and digits and at least 3.5 bits of Shannon entropy per character (hex: 32+ characters and 3.0), assigned to a name with a secret's word in it (`password`, `secret`, `token`, `credential`, `api_key`, `clientSecret`, `PASSWORD2`...) |
+
+- **A token is never part of a longer one:** a match may not start or end
+  inside a run of token characters (an `AKIA...` inside a base64 blob is
+  not a key).
+- **Placeholders are not secrets:** values containing `example`,
+  `XXXXXX`, `****`, `placeholder`, `changeme`, `your_`, `redacted` or
+  `dummy` (AWS's documentation key ends in `EXAMPLE`).
+- **The name rule** reads a name's words (`snake_case`, `camelCase`,
+  dotted keys; numbers are not words): `tokenizer`, `max_tokens` and
+  `cache_key` are not secret names, and a name ending in a word about the
+  secret (`_url`, `_file`, `_hash`, `_sha256`, `_id`, `_name`...) holds
+  something else. Unquoted values (`KEY=value`, `key: value`) count only in
+  `.env`, YAML, properties, INI and shell files and Dockerfiles; in code an
+  unquoted value is a name.
+- **Limits:** a password with spaces or symbols outside the token
+  characters, one shorter than 16 characters or without digits, is not
+  found by the name rule; nor is a secret passed in a call
+  (`getenv("X", "...")`) rather than assigned. UTF-16 files read as
+  binary.
+- **Formats are written from the providers' documented shapes,** and
+  tested with generated tokens of those shapes; no real token was used.
+  GitHub's tokens carry a checksum, which is not checked. **Nothing is ever
+  sent to a provider to ask whether a token works:** that would be a
+  request to another system, which VulnScan does not make. A finding says
+  "this looks like a credential", never "this credential is live".
+
+### Where it is, and what to do
+
+Every distinct file content (a git blob) reachable from any ref is scanned
+once and mapped back to each path and commit that has it, so each finding
+says where it is:
+
+| State | Means | Fails the scan? |
+|-------|-------|-----------------|
+| `committed` | in the commit checked out (HEAD), at this path | yes |
+| `history` | in an earlier commit, no longer at this path in HEAD: deleting the file did not remove it from anyone's clone | yes |
+| `file` | in a file outside any git repository (or one whose history could not be read): whether it is committed is not known | yes |
+| `uncommitted` | in the working tree only: an ignored `.env`, say, which is where a local secret belongs | no; reported |
+
+Each committed or history finding also gives the first commit that has it,
+and **whether it was pushed:** whether a commit with it is reachable from
+a remote-tracking ref (`refs/remotes/...`, as of the last fetch). Pushed:
+revoke it and issue a new one; rewriting history afterwards does not take
+it back. Not pushed: it can still be taken out of the commits before
+pushing. A working-tree file whose content is exactly HEAD's is not read
+twice; an edited one is, and only what HEAD does not have is new.
+
+### Reading git without git
+
+`src/vulnscan/git.py` reads `.git` directly: refs (loose and
+`packed-refs`), loose objects (zlib), version 2 pack indexes and packs,
+both kinds of delta (by offset and by id), commits, trees and annotated
+tags; every object is checked against its SHA-1 name. Why not run `git`:
+
+- **Running git in a repository runs that repository's configuration:**
+  `core.fsmonitor`, `core.pager` and others name programs git starts. A
+  scanner should be safe to point at any folder.
+- **In the container the repository belongs to another user,** and git
+  refuses it ("dubious ownership"); the image has no git at all.
+- **Nothing is written** (git may refresh its index even for a read).
+
+Not read, and said so: SHA-256 repositories, `objects/info/alternates`
+(object stores elsewhere), version 1 pack indexes, a `.git` that is a file
+(a worktree or submodule pointing elsewhere), links anywhere under `.git`.
+Missing objects (shallow or partial clones) are counted. Commit messages
+are not scanned.
+
+### Files that are not on this disk
+
+On macOS with iCloud's "Optimise Mac Storage", a file can be a
+placeholder whose content is in the cloud: reading it downloads it.
+VulnScan never reads one. The first scan of my portfolio stalled for
+minutes downloading them (782 working-tree files, 573 MB, on a disk 98%
+full; then 12 s per 41-byte ref). Placeholders in the working tree are
+listed, with whether git has a committed version (which the history scan
+did read); placeholders under `.git` are counted per repository, and the
+report says that repository's history may be incomplete.
+
+### Accepting a secret
+
+By fingerprint, in `.vulnscan.toml`, with a reason and an expiry date like
+any acceptance:
+
+```toml
+[[accept]]
+secret = "a38f66b9bc2437db"
+reason = "a fake key the tests are built around"
+expires = 2027-03-31
+```
+
+A `secret` that is not a 16-hex-digit fingerprint stops the scan, and the
+error does not repeat it. **The fingerprint is a slow hash** (PBKDF2-SHA256
+of the value, 100,000 rounds; 64 bits shown): it is printed and committed
+in baseline files, and a fast hash of a guessable value would let anyone
+test guesses against it at billions per second.
+
+### How it is tested
+
+- **The git reader against git itself** (`tests/test_git.py`, with
+  repositories made by git in the tests, isolated from any user
+  configuration): every object of a history read exactly as `git cat-file`
+  gives it, loose and after `git repack` with offset deltas and with
+  reference deltas (`repack.useDeltaBaseOffset=false`); every commit's
+  files, and each file's first commit, as `git ls-tree` gives them, on
+  fixed histories and 25 random ones (edits, deletions, branches, packed or
+  not); pushed and not pushed after a clone and a fetch; a shallow clone; a
+  SHA-256 repository refused; a linked ref not followed; damaged objects an
+  error, not a wrong answer. On 3 of my repositories (1,779 objects, one
+  with 126 commits) every object matched `git cat-file`.
+- **Each format, from generated fakes, in 7 forms** (bare, quoted, `KEY=`
+  right after `=`, YAML, JSON, an `Authorization` header, a notebook's
+  escaped source line): found exactly where it is, shown only as its prefix
+  and length; never part of a longer token; never as a placeholder. Real
+  private keys made for the test by `ssh-keygen` and `openssl`, with and
+  without a passphrase. JWTs live, expired and unsigned. 14 assignment
+  forms across languages and config files found; 13 names and 9 values
+  that are not secrets not found. 300 random texts never break the rules,
+  and 200 tokens planted in random surroundings are each found where they
+  are.
+- **No fake secret is written in the tests:** each is built at run time
+  from random characters (`tests/helpers.py`), so VulnScan scanning its own
+  repository finds nothing, and a push of it carries no token.
+- **End to end** (`tests/test_secrets.py`): a repository with a token in
+  HEAD (kept through an edit), one only in pushed history, one committed
+  but not pushed, an ignored `.env`, an uncommitted edit, a binary file and
+  a link out of the target, beside a folder outside git with a JWT and a
+  private key: each found in the right state, with its first commit, line
+  and pushed flag; decoys not found; **no planted secret (no 8 characters
+  of its random part) in the text, JSON or SARIF output**; acceptance by
+  fingerprint, expiry, unused acceptances; a baseline holding a secret
+  refused without repeating it; placeholder files not read.
+- **22 planted bugs** each fail the tests: git's offset-delta encoding,
+  a 64 KiB copy, objects not checked against their names, pushed not
+  upgraded, newest commit first, links under `.git` followed, links and
+  submodules read as files, the shallow boundary ignored, `=` before a
+  token, placeholders reported, the value shown, unsigned JWTs, encrypted
+  keys ranked as plain, numbers as words, an entropy threshold of 2.0,
+  bare values in code, an edited file's committed secret reported twice,
+  the later commit as first, placeholder files read, uncommitted secrets
+  failing, expired acceptances holding, repositories not found. Two passed
+  at first (pushed, and the entropy threshold): the tests had no case for
+  them, and now do.
+- **The image** (`make smoke`, 21 checks): a repository made on the host,
+  mounted read-only, owned by another user, scanned with no network and no
+  git: three fake tokens found in HEAD, in history and in an ignored file,
+  none printed in any format, nothing written.
+
+### On my portfolio (2026-10-09)
+
+The whole `projects` folder: 31 git repositories, 298 commits, 2,351
+distinct file versions and 2,836 working-tree files read. A scan took 12
+to 50 s across four timed runs on one 8 GB M2 laptop; the spread is not
+explained, and scan time is measured properly in Milestone 6.
+
+- **The first run found 4.** Three were a SHA-256 hash named
+  `token_lengths_sha256` (in two versions of a loraforge-llm evidence
+  file); one was a real API key in papertrail-rag's `.env`, correctly
+  `uncommitted` (the file is git-ignored and was never committed). That run
+  exposed two bugs, fixed after seeing it: the name rule read "256" as the
+  name's last word, and the format rules missed **every** `KEY=token` line,
+  because `=` counted as part of a token (the key had been found only by
+  its name). Since the fixes were made on this data, it is not an
+  independent measurement.
+- **After the fixes: 1 finding,** the same key, now named as a Groq key,
+  not failing. **No committed secret** in what could be read.
+- **What could not be read:** 782 working-tree files are iCloud
+  placeholders (753 not scanned, mostly generated `.json`, `.png` and
+  `.npz` outputs; 29 have a committed version, which was scanned); and
+  files under `.git` are placeholders in 17 repositories (1 to 48 each,
+  including 45 objects across 7 of them), so their history may be
+  incomplete. iCloud moves more out as the disk fills: the counts grew
+  between two runs an hour apart.
+- **False positives on other people's code:** 25,777 files of installed
+  packages (three Python environments' `site-packages`, two
+  `node_modules`) gave 2 findings, both a JWT in `zod`'s own tests (a
+  token's shape used as test data). Nothing that is not a credential was
+  found.
+
 ## Development
 
 ```bash
@@ -415,6 +629,11 @@ install does not work outside pytest.
 | `src/vulnscan/cvss.py` | CVSS 3 base scores, from the vector |
 | `src/vulnscan/baseline.py` | Accepted findings (`.vulnscan.toml`) |
 | `src/vulnscan/sarif.py` | Findings as SARIF 2.1.0 |
+| `src/vulnscan/git.py` | Reading `.git` by hand: refs, loose objects, packs and deltas, commits and trees; the history walk |
+| `src/vulnscan/secrets/rules.py` | What a secret looks like: formats, private keys, JWTs, high-entropy assignments; redaction; the fingerprint |
+| `src/vulnscan/secrets/__init__.py` | The secret scan: history and working tree, states, pushed, acceptances |
+| `scripts/show_context.py` | The lines around each secret finding, with values masked, for labelling by hand |
+| `tests/helpers.py` | Repositories made with git; fake secrets built at run time |
 | `scripts/check_cvss.py` | The computed ratings against GitHub's |
 | `tests/data/` | Six real advisories and the OASIS SARIF schema, with where they came from |
 | `tests/` | The walker (random trees with Hypothesis), the classifier, each reader (fixtures, generated files, fuzzing, pip as a reference), the CLI |
@@ -465,3 +684,27 @@ install does not work outside pytest.
    and removed a `.vulnscan.toml` there; the folder's time changed, and only
    the listing's minute resolution hid it. The check now runs before the
    script writes anything.
+9. **The first portfolio secret scan stalled,** at 0% CPU: reading every
+   working-tree file made iCloud download its placeholders (782 files,
+   573 MB, onto a disk 98% full), then 12 s per 41-byte ref under `.git`.
+   I stopped it; placeholders are now never read, and the report says what
+   was missed.
+10. **Every `KEY=token` line was missed.** A token may not start inside a
+    longer run of token characters, and `=` was one of them, so a token
+    right after `=` (an `.env` file's form) never matched. The real key in
+    papertrail-rag's `.env` was found only by its name; asking why a Groq
+    rule did not fire showed it. `=` only ends base64 (padding), so it may
+    come before a token; the `.env` form is now tested for every format.
+11. **A hash was called a secret.** `token_lengths_sha256` split into the
+    words token, lengths, sha, 256: the last word "256" is not one that
+    says a name holds something about a secret, so its hex value counted.
+    Numbers are no longer words.
+12. **Two planted bugs passed at first.** "Pushed not upgraded" had no
+    case where content is committed unpushed first and pushed later; and my
+    low-entropy test value `abc123...` is all hex digits, so the hex rule
+    refused it before the entropy threshold mattered. Both tests added.
+13. **Two of my own tests were wrong:** one made a branch before any
+    commit (git refuses), and one expected a variable-length token followed
+    by a letter not to match, when the longer run is itself a token of that
+    shape. Both corrected; what is tested now is that a match never stops
+    inside a longer run.

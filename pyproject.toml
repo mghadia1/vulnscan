@@ -46,6 +46,10 @@ target-version = "py314"
 # UP: modern syntax for the target version.
 select = ["E", "F", "I", "B", "UP"]
 
+[tool.ruff.lint.isort]
+# tests/helpers.py, imported by the tests as a module of their own.
+known-local-folder = ["helpers"]
+
 [tool.mypy]
 strict = true
 files = ["src", "tests"]

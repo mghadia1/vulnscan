@@ -31,7 +31,7 @@ def test_json_report(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
     )
     report = json.loads(capsys.readouterr().out)
     assert report["tool"] == {"name": "vulnscan", "version": __version__}
-    assert report["schema"] == 2
+    assert report["schema"] == 3
     assert report["summary"] == {
         "files": 4,
         "recognized": 3,
@@ -44,6 +44,10 @@ def test_json_report(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
         "accepted": 0,
         "undecided": 0,
         "by_severity": {},
+        "repositories": 0,
+        "secrets": 0,
+        "secrets_failing": 0,
+        "secrets_by_state": {},
     }
     assert report["advisories"] == {"checked": False}
     assert report["files"] == [

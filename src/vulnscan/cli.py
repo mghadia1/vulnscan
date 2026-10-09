@@ -1,6 +1,7 @@
 """The command line.
 
-- ``vulnscan scan PATH``: the scan. Reads files only; never the network.
+- ``vulnscan scan PATH``: the scan: dependencies against advisories, and
+  secrets in files and git history. Reads files only; never the network.
 - ``vulnscan update``: downloads OSV's advisory exports and indexes them
   (the only command that uses the network).
 - ``vulnscan lookup ECOSYSTEM NAME VERSION``: which advisories affect one
@@ -19,7 +20,7 @@ from datetime import UTC, date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
-from vulnscan import __version__
+from vulnscan import __version__, secrets
 from vulnscan.advisories import (
     DB_NAME,
     ECOSYSTEMS,
@@ -31,8 +32,9 @@ from vulnscan.advisories import (
 from vulnscan.advisories.fetch import FetchError
 from vulnscan.advisories.osv import Verdict
 from vulnscan.baseline import FILE_NAME, BaselineError, apply, load
+from vulnscan.findings import Acceptance
 from vulnscan.findings import match as match_advisories
-from vulnscan.report import THRESHOLDS, Checked, Report
+from vulnscan.report import THRESHOLDS, Checked, Report, SecretsChecked
 from vulnscan.walk import walk
 
 # Advisories older than this are named in the report (not a failure).
@@ -82,6 +84,14 @@ def _parser() -> argparse.ArgumentParser:
         help="list the inventory only, without checking it",
     )
     scan.add_argument(
+        "--no-secrets", action="store_true", help="do not look for secrets"
+    )
+    scan.add_argument(
+        "--no-history",
+        action="store_true",
+        help="look for secrets in the commit checked out only, not all history",
+    )
+    scan.add_argument(
         "--output",
         type=Path,
         help="write the report to this file instead of standard output",
@@ -125,13 +135,31 @@ def _scan(args: argparse.Namespace) -> int:
     if not target.is_dir():
         print(f"vulnscan: not a directory: {target}", file=sys.stderr)
         return EXIT_ERROR
-    report = Report.from_tree(str(target), walk(target.resolve()))
+    root = target.resolve()
+    report = Report.from_tree(str(target), walk(root))
     report = replace(report, threshold=args.fail_on)
+    baseline: Path | None = None
+    if not args.no_baseline:
+        baseline = args.baseline
+        if baseline is None and (target / FILE_NAME).is_file():
+            baseline = target / FILE_NAME
+    try:
+        acceptances = load(baseline) if baseline is not None else []
+    except BaselineError as error:
+        print(f"vulnscan: {error}", file=sys.stderr)
+        return EXIT_ERROR
     if not args.no_advisories:
-        checked = _check(args, target, report)
+        checked = _check(args, report, acceptances, baseline)
         if isinstance(checked, int):
             return checked
         report = replace(report, checked=checked)
+    if not args.no_secrets:
+        found = secrets.scan(root, report.tree, history=not args.no_history)
+        applied = secrets.apply(found.findings, acceptances, date.today())
+        report = replace(
+            report,
+            secrets=SecretsChecked(found, applied, str(baseline) if baseline else None),
+        )
     if args.format == "json":
         text = report.to_json()
     elif args.format == "sarif":
@@ -153,7 +181,12 @@ def _scan(args: argparse.Namespace) -> int:
     return EXIT_FINDINGS if report.failed else EXIT_CLEAN
 
 
-def _check(args: argparse.Namespace, target: Path, report: Report) -> Checked | int:
+def _check(
+    args: argparse.Namespace,
+    report: Report,
+    acceptances: list[Acceptance],
+    baseline: Path | None,
+) -> Checked | int:
     """Matches the inventory against the advisories and applies the
     baseline; an exit code if that cannot be done."""
     path = (args.data or data_dir()) / DB_NAME
@@ -170,16 +203,6 @@ def _check(args: argparse.Namespace, target: Path, report: Report) -> Checked | 
         matching = match_advisories(report.inventory, db)
     finally:
         db.close()
-    baseline: Path | None = None
-    if not args.no_baseline:
-        baseline = args.baseline
-        if baseline is None and (target / FILE_NAME).is_file():
-            baseline = target / FILE_NAME
-    try:
-        acceptances = load(baseline) if baseline is not None else []
-    except BaselineError as error:
-        print(f"vulnscan: {error}", file=sys.stderr)
-        return EXIT_ERROR
     applied = apply(matching.findings, acceptances, date.today())
     notes = []
     now = datetime.now(UTC)

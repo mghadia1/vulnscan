@@ -49,12 +49,14 @@ def severity_rank(severity: str) -> int:
 
 @dataclass(frozen=True)
 class Acceptance:
-    """A finding accepted on purpose, in the baseline file (baseline.py)."""
+    """A finding accepted on purpose, in the baseline file (baseline.py):
+    an advisory, or a secret by its fingerprint."""
 
-    advisory: str
+    advisory: str | None
     package: str | None
     reason: str
     expires: date
+    secret: str | None = None
 
 
 @dataclass(frozen=True)

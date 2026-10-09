@@ -79,7 +79,7 @@ def test_planted_vulnerabilities_are_found_and_safe_versions_are_not(
     code, out = scan(repo, data, "--format", "json")
     assert code == EXIT_FINDINGS
     report = json.loads(out)
-    assert report["schema"] == 2
+    assert report["schema"] == 3
     rows = [
         (
             f["severity"],

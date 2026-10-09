@@ -5,7 +5,9 @@ are recorded, never followed: a link in a repository can point anywhere on
 the machine. Nothing is ever written. Directories that hold other people's
 code or caches are skipped (``SKIPPED_DIRS``), and so is any Python virtual
 environment, found by its ``pyvenv.cfg`` rather than by its name: its
-installed packages are read separately, by the inventory.
+installed packages are read separately, by the inventory. A ``.git``
+directory is not walked either; the repository it belongs to is listed, for
+the secret scan to read its history.
 """
 
 import os
@@ -41,6 +43,8 @@ class Tree:
     symlinks: tuple[str, ...]
     skipped: tuple[str, ...]
     errors: tuple[str, ...]
+    # Folders holding a .git directory ("." for the root itself).
+    repositories: tuple[str, ...] = ()
 
 
 def _relative(root: Path, path: str) -> str:
@@ -54,6 +58,7 @@ def walk(root: Path) -> Tree:
     symlinks: list[str] = []
     skipped: list[str] = []
     errors: list[str] = []
+    repositories: list[str] = []
 
     def failed(error: OSError) -> None:
         where = error.filename if isinstance(error.filename, str) else str(root)
@@ -67,6 +72,8 @@ def walk(root: Path) -> Tree:
                 symlinks.append(_relative(root, path))
             elif name in SKIPPED_DIRS:
                 skipped.append(_relative(root, path))
+                if name == ".git":
+                    repositories.append(_relative(root, here) or ".")
             elif os.path.isfile(os.path.join(path, VENV_MARKER)):
                 environments.append(_relative(root, path))
             else:
@@ -87,4 +94,5 @@ def walk(root: Path) -> Tree:
         symlinks=tuple(sorted(symlinks)),
         skipped=tuple(sorted(skipped)),
         errors=tuple(sorted(errors)),
+        repositories=tuple(sorted(repositories)),
     )
