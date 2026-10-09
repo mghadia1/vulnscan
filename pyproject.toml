@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vulnscan"
+version = "0.1.0"
+description = "A defensive scanner for my own repositories: vulnerable dependencies, committed secrets, risky container settings"
+requires-python = ">=3.14"
+license = "MIT"
+# No runtime dependencies yet: the standard library reads TOML, JSON and
+# the file tree.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+  "hypothesis>=6.140",
+  "mypy>=2.4",
+  "pytest>=9.1",
+  "ruff>=0.16",
+]
+
+[project.scripts]
+vulnscan = "vulnscan.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+# Test the working tree, not whatever copy happens to be installed in the venv.
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+
+[tool.ruff.lint]
+# E/F: pycodestyle and pyflakes. I: import order. B: likely bugs.
+# UP: modern syntax for the target version.
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.mypy]
+strict = true
+files = ["src", "tests"]
