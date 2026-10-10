@@ -8,14 +8,15 @@ TypeScript and JavaScript, Go, Java and R.
 
 > **Scope:** VulnScan reads files in repositories I own, read-only. It does
 > not scan networks or send requests to other systems; its only network use
-> (from Milestone 2) is downloading public advisory data from OSV. Scans run
+> is downloading public advisory data from OSV (`vulnscan update`). Scans run
 > with no network at all.
 
 It deliberately does not use pip-audit, safety, osv-scanner, npm audit,
 govulncheck, Trivy, Grype, Snyk, gitleaks, trufflehog, detect-secrets,
 hadolint or Checkov underneath: the point is to build what they do.
 
-> **Status:** Milestones 0-6 of 7. `vulnscan scan` finds a repository's
+> **Status:** all 7 milestones built, on my machine (no GitHub repository
+> yet, so CI has not run). `vulnscan scan` finds a repository's
 > Python, npm and Go dependencies (installed, locked, pinned or declared)
 > and checks them against a local index of OSV's advisories, with version
 > ordering and CVSS scoring written by hand: findings with severity and the
@@ -27,7 +28,9 @@ hadolint or Checkov underneath: the point is to build what they do.
 > Compose files with its own parsers (checked against BuildKit and PyYAML)
 > for risky settings: running as root, unpinned images, unchecked
 > downloads, secrets in the image, privileged containers, the Docker socket,
-> databases open to the network, default passwords.
+> databases open to the network, default passwords. Run on my own
+> portfolio, every finding was labelled by hand and the dependency findings
+> were cross-checked against osv-scanner ([docs/evaluation.md](docs/evaluation.md)).
 
 ## Status
 
@@ -40,7 +43,7 @@ hadolint or Checkov underneath: the point is to build what they do.
 | 4 | Secrets in files and git history, never shown in a finding | Built |
 | 5 | Dockerfile and Compose rules | Built |
 | 6 | Evaluation on my own repositories: every finding labelled by hand; dependency findings cross-checked against osv-scanner | Built ([docs/evaluation.md](docs/evaluation.md)) |
-| 7 | README: diagram, decisions, failures, results; explain-it-yourself prompts | Not started |
+| 7 | README: diagram, decisions, failures, results; explain-it-yourself prompts | Built ([docs/explain-it-yourself.md](docs/explain-it-yourself.md)) |
 
 "Built" means built and tested on my machine; there is no GitHub repository
 yet, so CI has not run.
@@ -93,6 +96,78 @@ vulnerable dependency, three fake secrets (in HEAD, in history, in an
 ignored file) and ten container rules, never prints a secret or a
 password, and writes nothing into the target.
 
+## Architecture
+
+```mermaid
+flowchart TB
+    subgraph update["vulnscan update"]
+        osv["OSV's public bucket: the only network use<br/>one zip of advisories per ecosystem"]
+        fetch["advisories/fetch.py<br/>streamed to .part, length and MD5 checked,<br/>SHA-256 recorded"]
+        osv --> fetch
+    end
+    db[("~/.cache/vulnscan/osv.sqlite<br/>advisories by package; one ecosystem<br/>replaced per transaction")]
+    fetch --> db
+
+    target[/"The target folder<br/>read-only; no network during a scan"/]
+    walk["walk.py<br/>every file; links listed, never followed;<br/>environments by pyvenv.cfg; .git marked"]
+    target --> walk
+
+    subgraph deps["Dependencies"]
+        inv["inventory/<br/>environments, lockfiles, manifests,<br/>bundled SBOMs: name, version, how sure"]
+        match["findings.py<br/>OSV ranges with version ordering by hand;<br/>aliases merged, CVSS 3.1, the fix"]
+        inv --> match
+    end
+    subgraph secrets["Secrets"]
+        git["git.py<br/>.git read by hand: refs, packs, deltas,<br/>every object checked against its name"]
+        rules["secrets/<br/>formats, keys, JWTs, assignments;<br/>states, pushed, never printed"]
+        git --> rules
+    end
+    subgraph containers["Containers"]
+        parse["dockerfile.py (as BuildKit reads),<br/>yamlsub.py, shell.py"]
+        crules["containers/<br/>13 rules"]
+        parse --> crules
+    end
+
+    walk --> inv
+    walk --> git
+    walk --> parse
+    db -->|"read-only"| match
+    accept["baseline.py<br/>.vulnscan.toml: accepted, with a reason<br/>and an expiry date"]
+    match --> accept
+    rules --> accept
+    crules --> accept
+    accept --> report["report.py, sarif.py<br/>text, JSON (schema 4), SARIF 2.1.0;<br/>exit 0 clean, 1 findings, 2 not checked"]
+```
+
+Three scans share one walk of the target and one report. Each part can be
+left out (`--no-advisories`, `--no-secrets`, `--no-containers`); a scan
+never writes into the target and never opens a connection.
+
+What happens to one package, from file to exit code:
+
+```
+.venv/lib/python3.14/site-packages/pip/_vendor/bom.cdx.json
+  ──► walk: inside an environment (its pyvenv.cfg) ──► inventory: PyPI urllib3 2.7.0, "bundled in pip"
+  ──► index: every advisory that names PyPI urllib3 ──► each range's events sorted by PEP 440 order
+      and walked: affected, not affected, or unknown (never guessed)
+  ──► advisories that are aliases of each other become one finding: severity the highest CVSS 3.1
+      base score among them, the fix the lowest version that fixes them all ("upgrade pip to a
+      release that bundles ...")
+  ──► .vulnscan.toml: accepted? ──► text / JSON / SARIF ──► exit 1 if any decided finding is
+      unaccepted and at or above --fail-on
+```
+
+And to one secret:
+
+```
+a blob inside .git/objects/pack/*.pack
+  ──► git.py: found through the pack index, deltas applied, checked against its SHA-1 name
+  ──► scanned once, however many commits and paths share it ──► a match that is not part of a longer token
+  ──► kept: rule, line, column, length, the format's fixed prefix, a PBKDF2 fingerprint (never the value)
+  ──► mapped back to each path and commit: committed, history, in-git, file or uncommitted;
+      the first commit that has it; pushed if a remote-tracking ref reaches it
+```
+
 ## What a scan reads
 
 - **The target directory, and nothing outside it.** Symbolic links are
@@ -103,13 +178,14 @@ password, and writes nothing into the target.
   (by hand, read-only: see "Secrets"). A Python
   virtual environment is recognised by its `pyvenv.cfg` (whatever the
   folder is called) and listed separately: its installed packages are what
-  the inventory (Milestone 1) will read.
+  the inventory reads.
 - **Recognised files,** by name: `requirements*.txt`, `pyproject.toml`,
   `uv.lock`, `poetry.lock`, `Pipfile.lock`, `package.json`,
   `package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `go.mod`, `go.sum`,
   `pom.xml`, `build.gradle`, `renv.lock`, `Cargo.lock`, Dockerfiles and
-  Compose files. Recognising a file is not reading it: which of these are
-  read is decided milestone by milestone, and stated.
+  Compose files. Recognising a file is not reading it: what each part
+  reads is listed below, and a recognised file nothing reads (a `pom.xml`)
+  is named in the report as not read.
 - **Exit codes:** 0, nothing at or above the failure threshold; 1, findings
   at or above it; 2, the scan could not be done (a missing path, a bad
   option). Unreadable directories are reported in the output, not fatal.
@@ -757,33 +833,50 @@ findings in 20 files, each labelled by hand:**
 PaperTrail, `docker compose up` puts a Postgres whose password is its user
 name on every network interface of the machine, so anyone on the same
 network could log in while it runs. SurgiServe and Gatekeeper already bind
-theirs to 127.0.0.1. Nothing has been changed in those repositories:
-Milestone 6 decides fixes with me. A first test with these files ran into
+theirs to 127.0.0.1. After the evaluation I chose to fix this one (see
+"Evaluation on my repositories"). A first test with these files ran into
 a placeholder Dockerfile, and that led to a bug in Milestone 4's secret
 scan (failure 14).
 
 ## Evaluation on my repositories
 
 The whole record is in [docs/evaluation.md](docs/evaluation.md) (Milestone 6,
-2026-10-09). In short:
+2026-10-09: the `projects` folder, 31 git repositories, 24 Python
+environments, that day's OSV data, one 8 GB M2 laptop). Every finding was
+labelled by hand:
+
+| Part | Findings | Labelled | Fails the scan |
+|------|----------|----------|----------------|
+| Dependencies, decided | 151 (2 critical, 82 high, 66 medium, 1 low) | all 151 inside the advisory's affected versions; 125 are vulnerable code that is there, 26 match by version only | yes |
+| Dependencies, undecided | 73 | all 73 not affected on inspection (advisories whose own bounds are not versions) | no |
+| Secrets | 1 | true: a real key in a git-ignored `.env`, never committed | no (`uncommitted`) |
+| Dockerfiles and Compose files | 49 | 48 true; 1 false in context (a healthcheck that Compose provides) | yes |
 
 - **Against osv-scanner** (2.6.0, same tree, same day's OSV data): on every
   package both tools read, the same 151 advisory groups, none that only
   osv-scanner reports, and the same severity score in 64 of 65. That
   agreement came after a fix: the first comparison showed VulnScan missing
   code bundled inside other packages (78 advisory groups in pip's bundled
-  urllib3, msgpack and setuptools), so bundled packages are now read.
-  osv-scanner covers R and Java; VulnScan does not (nothing there today).
-- **Every finding labelled by hand:** of 151 decided dependency findings,
-  125 are vulnerable code that is there, 26 match by version only (pip
-  bundles only `pkg_resources` of setuptools); the 73 undecided are all
-  not affected on inspection. Secrets: 1, true, not committed. Containers:
-  49, 48 true.
+  urllib3, msgpack and setuptools), so bundled packages are now read, and
+  the agreement is not an independent measurement. osv-scanner covers R
+  and Java; VulnScan does not (nothing there today).
+- **Recall is not measured:** no list exists of everything wrong in these
+  repositories. What is known: nothing osv-scanner finds is missed (after
+  the fix), every planted case in the tests is found, and what could not be
+  read (iCloud placeholders, pips without an SBOM, R and Java) is listed.
 - **Scan time:** the whole portfolio in 7.4 s (median of five warm runs, one
   8 GB M2 laptop), 2.1 s of it dependencies and 5.8 s secrets with all
   history; it was 14.0 s until a profile showed the token-format patterns
   taking 57% of the secret scan, and a format whose fixed literal is not in
-  a file is no longer searched for (the same findings, byte for byte).
+  a file is no longer searched for (the same findings, byte for byte). A
+  cold scan is not measured.
+- **What I fixed:** of four fixes offered, I chose one. LinkForge and
+  PaperTrail now publish their databases on 127.0.0.1 only, on a branch in
+  each repository (`fix/compose-databases-localhost`, not merged or
+  pushed); a re-scan shows exactly those three findings gone. The
+  dependency upgrades were not made, and upgrading pip would not clear the
+  bundled findings anyway: pip 26.2.1, the newest on 2026-10-09, still
+  bundles the vulnerable urllib3 and msgpack.
 
 ## Development
 
@@ -800,42 +893,117 @@ install does not work outside pytest.
 
 ## Layout
 
+In the order a scan uses them:
+
 | Path | What |
 |------|------|
-| `src/vulnscan/cli.py` | The command line, and its exit codes |
-| `src/vulnscan/walk.py` | Which files a scan reads: no links followed, nothing written |
+| `src/vulnscan/cli.py`, `__main__.py` | The command line (`scan`, `update`, `lookup`) and its exit codes |
+| `src/vulnscan/walk.py` | Which files a scan reads: no links followed, nothing written; environments and repositories found |
 | `src/vulnscan/classify.py` | Which files matter, by name |
-| `src/vulnscan/report.py` | The report, as JSON (with a schema number) and as text |
-| `src/vulnscan/inventory/__init__.py` | The inventory: each file to its reader, environments, includes, what is not read and why |
+| `src/vulnscan/inventory/__init__.py`, `model.py` | The inventory: each file to its reader, environments, includes, what is not read and why |
 | `src/vulnscan/inventory/python.py`, `pep508.py` | Requirements files, pyproject.toml, uv.lock, poetry.lock, installed environments; requirement strings |
 | `src/vulnscan/inventory/npm.py`, `golang.py` | package-lock.json and package.json; go.mod |
-| `scripts/check_inventory.py` | The inventory against pip, npm and go, on real repositories |
+| `src/vulnscan/inventory/sbom.py` | Package URLs and CycloneDX SBOMs: packages bundled inside others |
+| `src/vulnscan/advisories/fetch.py`, `db.py`, `__init__.py` | The checked download; the SQLite index; update and lookup |
+| `src/vulnscan/advisories/osv.py` | Reading an advisory, and the OSV evaluation (affected, not affected, unknown) |
 | `src/vulnscan/versions/` | Version ordering by hand: PEP 440, SemVer, Go |
-| `src/vulnscan/advisories/osv.py` | Reading an advisory, and the OSV evaluation |
-| `src/vulnscan/advisories/db.py`, `fetch.py`, `__init__.py` | The SQLite index; the checked download; update and lookup |
-| `scripts/check_ranges.py`, `scripts/check_against_osv_api.py` | The evaluation against OSV's lists, and against OSV's own service |
 | `src/vulnscan/findings.py` | Matching the inventory to advisories: grouping aliases, severity, the fix |
 | `src/vulnscan/cvss.py` | CVSS 3 base scores, from the vector |
-| `src/vulnscan/baseline.py` | Accepted findings (`.vulnscan.toml`) |
-| `src/vulnscan/sarif.py` | Findings as SARIF 2.1.0 |
-| `src/vulnscan/git.py` | Reading `.git` by hand: refs, loose objects, packs and deltas, commits and trees; the history walk |
+| `src/vulnscan/git.py` | Reading `.git` by hand: refs, loose objects, packs and deltas, commits and trees; HEAD and its reflog; the history walk |
 | `src/vulnscan/secrets/rules.py` | What a secret looks like: formats, private keys, JWTs, high-entropy assignments; redaction; the fingerprint |
 | `src/vulnscan/secrets/__init__.py` | The secret scan: history and working tree, states, pushed, acceptances |
-| `scripts/show_context.py` | The lines around each secret finding, with values masked, for labelling by hand |
-| `src/vulnscan/inventory/sbom.py` | Package URLs and CycloneDX SBOMs: packages bundled inside others |
-| `docs/evaluation.md` | Milestone 6: every finding on my portfolio, labelled; the osv-scanner cross-check; scan time |
-| `scripts/compare_osv_scanner.py` | VulnScan's findings against osv-scanner's, on the same tree and data |
-| `bench/scan_time.py`, `bench/results/` | Scan time by part, with a swap check per run |
-| `src/vulnscan/containers/__init__.py` | The Dockerfile and Compose rules; reading a file, or its committed copy; acceptances by rule |
 | `src/vulnscan/containers/dockerfile.py` | Dockerfiles, read as BuildKit reads them; words and ENV/ARG pairs |
 | `src/vulnscan/containers/yamlsub.py` | The part of YAML Compose files use |
 | `src/vulnscan/containers/shell.py` | A RUN line's commands, pipelines and substitutions; downloads run as code |
-| `scripts/buildkit_parse/`, `scripts/check_dockerfile_parser.py` | BuildKit's own parse (a Go development tool), and the comparison with it |
+| `src/vulnscan/containers/__init__.py` | The Dockerfile and Compose rules; reading a file, or its committed copy; acceptances by rule |
+| `src/vulnscan/baseline.py` | Accepted findings (`.vulnscan.toml`) |
+| `src/vulnscan/report.py`, `sarif.py` | The report as text, JSON (with a schema number) and SARIF 2.1.0 |
+| `tests/` | One file per part: fixtures, generated inputs (Hypothesis), references used only by the tests |
 | `tests/helpers.py` | Repositories made with git; fake secrets built at run time |
+| `tests/data/` | Six real advisories, the OASIS SARIF schema, recorded BuildKit answers, three of my Compose files; each with where it came from |
+| `scripts/check_inventory.py` | The inventory against pip, npm and go, on real repositories |
+| `scripts/check_ranges.py`, `check_against_osv_api.py` | The evaluation against OSV's lists, and against OSV's own service |
 | `scripts/check_cvss.py` | The computed ratings against GitHub's |
-| `tests/data/` | Six real advisories and the OASIS SARIF schema, with where they came from |
-| `tests/` | The walker (random trees with Hypothesis), the classifier, each reader (fixtures, generated files, fuzzing, pip as a reference), the CLI |
+| `scripts/buildkit_parse/`, `check_dockerfile_parser.py` | BuildKit's own parse (a Go development tool), and the comparison with it |
+| `scripts/compare_osv_scanner.py` | VulnScan's findings against osv-scanner's, on the same tree and data |
+| `scripts/show_context.py` | The lines around each secret finding, with values masked, for labelling by hand |
 | `scripts/smoke.sh` | Checks the image from outside |
+| `bench/scan_time.py`, `bench/results/` | Scan time by part, with a swap check per run |
+| `docs/evaluation.md` | Milestone 6: every finding on my portfolio, labelled; the osv-scanner cross-check; scan time; the fixes I chose |
+| `docs/explain-it-yourself.md` | Questions to answer without notes before an interview (no answers) |
+| `Dockerfile`, `Makefile`, `.github/workflows/ci.yml` | The image (non-root, no git), the commands above, CI (written; it has not run) |
+
+## Design decisions
+
+### Scope and safety
+
+| Decision | Why | Cost, or what would change it |
+|----------|-----|-------------------------------|
+| Repositories I own, read-only; no network during a scan; the only download is OSV's public data | A scanner that finds secrets must not be able to leak them, and a defensive tool should not touch other systems | Advisory data goes stale between updates (data over 7 days old is named in the report) |
+| Built, not wrapped: none of pip-audit, osv-scanner, gitleaks, hadolint and the rest underneath | Building what they do is what this project is for | Narrower coverage than theirs: no R, Java, Rust, yarn, pnpm or Pipfile.lock |
+| No runtime dependencies: the standard library only (`tomllib`, `sqlite3`, `zlib`, `json`) | Nothing to install or trust in the image beyond Python | A hand-written YAML reader that refuses what it does not support |
+| Links are listed, never followed, anywhere (the walk, environments, `-r` includes, `.git`) | A link in a repository can point anywhere on the machine | A project that links its environment from elsewhere is not read (it is named) |
+| iCloud placeholders are never read | Reading one downloads it; the first portfolio scan stalled for minutes (failure 9) | What is not on the disk is not scanned; the report lists it |
+| Never run git; read `.git` by hand | Running git in a repository runs that repository's configuration (`core.fsmonitor` names a program); in the image the repository belongs to another user and git refuses it; git may write | About 700 lines to maintain; SHA-256 repositories, alternates and version 1 pack indexes are refused |
+
+### Dependencies
+
+| Decision | Why | Cost, or what would change it |
+|----------|-----|-------------------------------|
+| Exact versions from installed environments first | Most of my projects declare only lower bounds and have no lockfile: the venv is the only record of what runs | A stale venv reports stale versions, and CI may install something newer |
+| A range (`fastapi>=0.142`) is never matched | Which version is used is not known; matching its lowest version would invent findings | A project with only ranges gets no dependency findings (counted as not matched) |
+| The project's own code is local (PEP 610's `direct_url.json`), never matched | A local package that shares a name with one on PyPI would get that package's advisories | A copy of a public package installed from a folder is not checked |
+| Version ordering written from the specifications (PEP 440, SemVer 2.0.0, Go), checked against `packaging` and `semver` in tests | It is the core of the matching, and what this project is for | Go's ordering is checked against examples only: there is no reference library in Python |
+| Three answers: affected, not affected, unknown; unknown is reported and never fails | An advisory whose bound is "2.6.0-cu124" cannot be compared with a PEP 440 version without guessing | 73 undecided findings on my portfolio that a person has to read (all not affected) |
+| One finding per package occurrence and vulnerability, aliases merged | One bug in GitHub's and Go's databases is one thing to fix; the same package in two environments is two fixes | Long reports: pip's bundled urllib3 in 13 environments is 39 findings |
+| Severity: the highest CVSS 3.x base score, computed here; else GitHub's word; malicious = critical; else unknown, which never passes | A computed score can be checked (all 2,592 base vectors against the `cvss` library) | CVSS 4.0 is not scored, so 1 of 65 scores differs from osv-scanner's |
+| An SQLite index, each ecosystem replaced in one transaction | Lookups by package without loading 264,000 advisories; an update that fails part-way leaves the old data | 123 MB on a nearly full disk, and every update downloads everything again |
+| Bundled packages read from SBOMs and `_vendor` metadata, matched by version | pip's copy of urllib3 runs whenever pip runs | Matching by version cannot see what was bundled: 26 setuptools findings whose vulnerable code pip does not carry |
+
+### Secrets
+
+| Decision | Why | Cost, or what would change it |
+|----------|-----|-------------------------------|
+| No output ever contains a secret: rule, place, length, the format's fixed prefix, a fingerprint | Reports end up in CI logs and SARIF uploads | A finding cannot be confirmed from the report alone (`scripts/show_context.py` shows the lines around it, masked, on my machine) |
+| The fingerprint is PBKDF2-SHA256, 100,000 rounds, 64 bits shown | It is printed and committed in baseline files; a fast hash of a guessable password lets anyone test guesses against it | Slower to compute, on purpose |
+| Every blob reachable from any ref is scanned once, then mapped back to its paths and commits | Deleted secrets live in history; scanning each file version once kept the whole portfolio's history to 5.8 s | Commit messages and unreachable objects are not scanned |
+| Five states; `uncommitted` reported but never failing | A git-ignored `.env` is where a local secret belongs | A secret in a file about to be committed passes until it is committed |
+| HEAD is never guessed: read from its reflog when its ref is not on the disk, otherwise unknown (`in-git`, `file`, both failing) | Calling HEAD "no commits" made committed secrets look uncommitted, which passes (failure 14) | When HEAD cannot be read, a secret already removed from the latest commit still fails |
+| Pushed or not, from remote-tracking refs | It decides the advice: revoke it, or take it out of the commits before pushing | As of the last fetch; a push from another clone is not seen |
+| Formats from the providers' documented shapes; no checksum check; nothing sent to a provider | Asking a provider whether a token works sends the token to another system | Cannot say whether a token is live; GitHub's checksum would cut false positives |
+| A match may not start or end inside a longer run of token characters | Base64 blobs contain runs that look like keys | A token glued to other token characters is missed |
+| The assignment rule needs 16+ characters, letters and digits, 3.5 bits of entropy per character, and a secret's name | 2 findings in 25,777 files of other people's code, both a JWT used as test data | Short passwords, passwords with spaces or symbols, and secrets passed in calls are missed |
+| A format is searched for only where its fixed literal appears | The twelve patterns over every file were 57% of the secret scan | Every new format must list its literal (an assertion checks they are all listed) |
+
+### Dockerfiles and Compose files
+
+| Decision | Why | Cost, or what would change it |
+|----------|-----|-------------------------------|
+| The Dockerfile parser follows BuildKit, and is checked against BuildKit's own parser (a Go development tool) | The reference must be what `docker build` does; `dockerfile-parse` is not (failure 15) | Go is needed to run the live comparison; the tests use 18 recorded BuildKit answers |
+| A YAML subset that refuses, with the line, what it does not support | Refusing is better than misreading; no runtime dependencies | Tags (`!reset`), several documents and quoted strings over several lines are refused |
+| Only the images a Dockerfile makes are judged (stages nothing else builds on) | A build stage that runs as root is not what anyone runs | `USER`, `EXPOSE` and `HEALTHCHECK` have to be followed through the stages |
+| One file at a time | Simple and predictable | The one false finding: a healthcheck in Compose does not silence the Dockerfile's |
+| Messages describe a password, never repeat it ("POSTGRES_PASSWORD is the same as POSTGRES_USER") | The same rule as for secrets | The reader has to open the file to see the value |
+| A placeholder file is read from git's HEAD instead | The committed copy is what was shipped | If the working copy differs, the committed one is judged (the finding says so) |
+
+### Reports and CI
+
+| Decision | Why | Cost, or what would change it |
+|----------|-----|-------------------------------|
+| Exit 2 when something could not be checked (no advisory data, or none for an ecosystem in use) | A scan that checked nothing must not pass CI | CI must run `vulnscan update` before the scan |
+| Acceptances in `.vulnscan.toml`, each with a reason and an expiry date; unused ones reported | Accepting a risk is a reviewed change, and it comes back for review | Entries have to be renewed |
+| SARIF 2.1.0 with GitHub's `security-severity`, validated against OASIS's schema | GitHub code scanning reads it | Validated, never uploaded: there is no GitHub repository yet |
+| JSON with a schema number (4) | A consumer can tell when the format changed | Bumped three times: findings, secrets, container rules |
+
+### Testing and measuring
+
+| Decision | Why | Cost, or what would change it |
+|----------|-----|-------------------------------|
+| Hand-written code checked against references in tests only: `packaging`, `semver`, `cvss`, PyYAML, BuildKit, git itself, pip's own preprocessing, `npm ls`, `go mod edit` | A misreading of a specification would otherwise be written into the code and its tests alike | A reference can be wrong too (`dockerfile-parse` was) |
+| The tests are tested: 124 planted bugs across the milestones, each must fail them | Several suites passed planted bugs at first (failures 3, 12, 19, 22) | Each new part needs its own planted bugs |
+| Fake secrets built from random characters at run time | No token is ever written into the repository; VulnScan scanning itself finds nothing | No real-world token is used, so formats are tested only as documented |
+| The evaluation is labelled by hand and cross-checked against osv-scanner, a development reference only | Precision needs someone deciding; an independent tool reading the same files with the same data shows what is missed | One labeller; and after the fix the comparison found, the agreement is no longer independent |
+| Scan time measured warm, in interleaved passes, with a swap check per run | Drift on the machine falls on every configuration alike; runs a swapping laptop spoiled are left out | A cold scan is not measured (emptying the file cache needs sudo) |
 
 ## Failures found while building it
 
@@ -961,3 +1129,7 @@ install does not work outside pytest.
 23. **Half of the scan was one kind of regular expression.** The profile
     showed twelve token-format patterns running over every file for 57% of
     the secret scan's time, though most files hold none of their literals.
+    Every format needs a fixed literal (`ghp_`, `AKIA`), so a format whose
+    literal is not in a file is no longer searched for there (an assertion
+    keeps every format listed): the same findings on the whole portfolio,
+    byte for byte, and the whole scan from 14.0 s to 7.4 s.
