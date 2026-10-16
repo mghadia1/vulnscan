@@ -15,8 +15,10 @@ It deliberately does not use pip-audit, safety, osv-scanner, npm audit,
 govulncheck, Trivy, Grype, Snyk, gitleaks, trufflehog, detect-secrets,
 hadolint or Checkov underneath: the point is to build what they do.
 
-> **Status:** all 7 milestones built, on my machine (no GitHub repository
-> yet, so CI has not run). `vulnscan scan` finds a repository's
+> **Status:** all 7 milestones built and tested on my machine, then
+> pushed to GitHub on 2026-10-15, where CI (ruff, mypy and pytest on
+> Python 3.14, plus a Docker build and smoke test) passed on the first
+> run. `vulnscan scan` finds a repository's
 > Python, npm and Go dependencies (installed, locked, pinned or declared)
 > and checks them against a local index of OSV's advisories, with version
 > ordering and CVSS scoring written by hand: findings with severity and the
@@ -45,8 +47,8 @@ hadolint or Checkov underneath: the point is to build what they do.
 | 6 | Evaluation on my own repositories: every finding labelled by hand; dependency findings cross-checked against osv-scanner | Built ([docs/evaluation.md](docs/evaluation.md)) |
 | 7 | README: diagram, decisions, failures, results; explain-it-yourself prompts | Built ([docs/explain-it-yourself.md](docs/explain-it-yourself.md)) |
 
-"Built" means built and tested on my machine; there is no GitHub repository
-yet, so CI has not run.
+"Built" means built and tested on my machine, then pushed to GitHub on
+2026-10-15, where CI passed on the first run.
 
 ## Quickstart
 
@@ -931,7 +933,7 @@ In the order a scan uses them:
 | `bench/scan_time.py`, `bench/results/` | Scan time by part, with a swap check per run |
 | `docs/evaluation.md` | Milestone 6: every finding on my portfolio, labelled; the osv-scanner cross-check; scan time; the fixes I chose |
 | `docs/explain-it-yourself.md` | Questions to answer without notes before an interview (no answers) |
-| `Dockerfile`, `Makefile`, `.github/workflows/ci.yml` | The image (non-root, no git), the commands above, CI (written; it has not run) |
+| `Dockerfile`, `Makefile`, `.github/workflows/ci.yml` | The image (non-root, no git), the commands above, CI (ruff, mypy, pytest, and a Docker build + smoke test; green since 2026-10-15) |
 
 ## Design decisions
 
@@ -992,7 +994,7 @@ In the order a scan uses them:
 |----------|-----|-------------------------------|
 | Exit 2 when something could not be checked (no advisory data, or none for an ecosystem in use) | A scan that checked nothing must not pass CI | CI must run `vulnscan update` before the scan |
 | Acceptances in `.vulnscan.toml`, each with a reason and an expiry date; unused ones reported | Accepting a risk is a reviewed change, and it comes back for review | Entries have to be renewed |
-| SARIF 2.1.0 with GitHub's `security-severity`, validated against OASIS's schema | GitHub code scanning reads it | Validated, never uploaded: there is no GitHub repository yet |
+| SARIF 2.1.0 with GitHub's `security-severity`, validated against OASIS's schema | GitHub code scanning reads it | Validated against the schema but never uploaded (CI does not upload it) |
 | JSON with a schema number (4) | A consumer can tell when the format changed | Bumped three times: findings, secrets, container rules |
 
 ### Testing and measuring
